@@ -40,6 +40,7 @@ type BoschECU struct {
     odometer     uint32
     faultCode    uint32
     kersEnabled  bool
+    throttleOn   bool
 }
 
 func NewBoschECU() ECUInterface {
@@ -94,6 +95,12 @@ func (b *BoschECU) handleStatus1Frame(frame can.Frame) error {
     
     // Speed
     b.speed = uint16(frame.Data[6])
+
+    if frame.Length >= 8 {
+        b.throttleOn = (frame.Data[7] & 0x01) != 0
+    } else {
+        b.throttleOn = false
+    }
 
     return nil
 }
@@ -229,6 +236,12 @@ func (b *BoschECU) GetKersEnabled() bool {
     b.mu.RLock()
     defer b.mu.RUnlock()
     return b.kersEnabled
+}
+
+func (b *BoschECU) GetThrottleOn() bool {
+    b.mu.RLock()
+    defer b.mu.RUnlock()
+    return b.throttleOn
 }
 
 func (b *BoschECU) Cleanup() {

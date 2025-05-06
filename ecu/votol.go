@@ -37,6 +37,7 @@ type VotolECU struct {
     odometer     uint32
     faultCode    uint32
     kersEnabled  bool
+    throttleOn   bool // Votol ECU does not seem to report throttle, will default to false
 }
 
 func NewVotolECU() ECUInterface {
@@ -171,6 +172,13 @@ func (v *VotolECU) GetKersEnabled() bool {
     v.mu.RLock()
     defer v.mu.RUnlock()
     return v.kersEnabled
+}
+
+func (v *VotolECU) GetThrottleOn() bool {
+    v.mu.RLock()
+    defer v.mu.RUnlock()
+    // Votol CAN messages, as currently parsed, do not provide throttle status.
+    return v.throttleOn
 }
 
 func (v *VotolECU) SetKersEnabled(enabled bool) error {

@@ -54,6 +54,9 @@ type ECUInterface interface {
     // GetFaultCode returns the current fault code
     GetFaultCode() uint32
     
+    // GetThrottleOn returns true if the throttle is currently active
+    GetThrottleOn() bool
+    
     // GetKersEnabled returns whether KERS is enabled
     GetKersEnabled() bool
     

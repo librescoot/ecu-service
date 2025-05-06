@@ -149,7 +149,7 @@ status1 := RedisStatus1{
     MotorCurrent: app.ecu.GetCurrent(),
     RPM:          app.ecu.GetRPM(),
     Speed:        app.ecu.GetSpeed(),  // Direct assignment, as GetSpeed() already returns uint16
-    ThrottleOn:   false,
+    ThrottleOn:   app.ecu.GetThrottleOn(),
 }
 
     status2 := RedisStatus2{
