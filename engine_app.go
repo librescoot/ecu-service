@@ -33,6 +33,55 @@ type EngineApp struct {
 	lastSpeed uint16 // Track last sent speed
 }
 
+// writeDefaultRedisState writes default values to Redis
+func (app *EngineApp) writeDefaultRedisState() {
+	app.mu.Lock()
+	defer app.mu.Unlock()
+
+	// Default Status1 values
+	status1 := RedisStatus1{
+		MotorVoltage: 0,     // 0V
+		MotorCurrent: 0,     // 0A
+		RPM:          0,     // 0 RPM
+		Speed:        0,     // 0 km/h
+		ThrottleOn:   false, // Throttle off
+	}
+
+	// Default Status2 values
+	status2 := RedisStatus2{
+		Temperature: 0, // 0°C
+	}
+
+	// Default Status3 values
+	status3 := RedisStatus3{
+		Odometer: 0, // 0 meters
+	}
+
+	// Default Status4 values
+	status4 := RedisStatus4{
+		KersOn: false, // KERS disabled
+	}
+
+	// Write all default values to Redis
+	if err := app.ipcTx.SendStatus1(status1); err != nil {
+		app.log.Printf("Failed to send default Status1: %v", err)
+	}
+
+	if err := app.ipcTx.SendStatus2(status2); err != nil {
+		app.log.Printf("Failed to send default Status2: %v", err)
+	}
+
+	if err := app.ipcTx.SendStatus3(status3); err != nil {
+		app.log.Printf("Failed to send default Status3: %v", err)
+	}
+
+	if err := app.ipcTx.SendStatus4(status4); err != nil {
+		app.log.Printf("Failed to send default Status4: %v", err)
+	}
+
+	app.log.Printf("Default Redis state written")
+}
+
 func NewEngineApp(opts *Options) (*EngineApp, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -63,6 +112,9 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 		return nil, fmt.Errorf("failed to connect to Redis: %v", err)
 	}
 	app.log.Printf("Successfully connected to Redis")
+
+	// Write default values to Redis
+	app.writeDefaultRedisState()
 
 	// Start health check goroutine
 	go app.redisHealthCheck()
