@@ -83,7 +83,7 @@ func (rx *IPCRx) handleVehicleSubscription() {
 
 		switch m := msg.(type) {
 		case *redis.Message:
-			rx.log.Printf("Vehicle message received: channel=%s", m.Channel)
+			rx.log.Printf("Vehicle message received: channel=%s, payload=%s", m.Channel, m.Payload)
 
 			// Check if state was updated
 			state, err := rx.redis.HGet(rx.ctx, "vehicle", "state").Result()
@@ -117,25 +117,23 @@ func (rx *IPCRx) handleBatterySubscription(idx int) {
 
 		switch m := msg.(type) {
 		case *redis.Message:
-			rx.log.Printf("Battery %d message received: channel=%s", idx, m.Channel)
+			rx.log.Printf("Battery %d message received: channel=%s, payload=%s", idx, m.Channel, m.Payload)
 
 			batteryKey := fmt.Sprintf("battery:%d", idx)
-
 			state := BatteryState{}
 
-			// Get active state
-			active, err := rx.redis.HGet(rx.ctx, batteryKey, "state").Result()
+			// Get current state first
+			currentState, err := rx.redis.HGetAll(rx.ctx, batteryKey).Result()
 			if err != nil && err != redis.Nil {
-				rx.log.Printf("Failed to get battery %d state: %v", idx, err)
-			} else if err != redis.Nil {
-				state.Active = (active == "active")
+				rx.log.Printf("Failed to get battery %d current state: %v", idx, err)
+				continue
 			}
 
-			// Get temperature state
-			tempState, err := rx.redis.HGet(rx.ctx, batteryKey, "temperature-state").Result()
-			if err != nil && err != redis.Nil {
-				rx.log.Printf("Failed to get battery %d temperature state: %v", idx, err)
-			} else if err != redis.Nil {
+			// Update state based on current values
+			if active, ok := currentState["state"]; ok {
+				state.Active = (active == "active")
+			}
+			if tempState, ok := currentState["temperature-state"]; ok {
 				switch tempState {
 				case "cold":
 					state.TemperatureState = BatteryTemperatureStateCold
