@@ -26,8 +26,8 @@ A Go-based service for interfacing with electric scooter Engine Control Units (E
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/librescoot/vehicle-service.git
-cd vehicle-service
+git clone https://github.com/librescoot/ecu-service.git
+cd ecu-service
 ```
 
 2. Build the service:

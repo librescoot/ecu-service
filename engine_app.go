@@ -36,7 +36,7 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	app := &EngineApp{
-		log:    log.New(log.Writer(), fmt.Sprintf("[%s] ", ProjectName), log.LstdFlags),
+		log:    log.New(log.Writer(), fmt.Sprintf("ECU: %s", ProjectName), log.LstdFlags),
 		ctx:    ctx,
 		cancel: cancel,
 	}
