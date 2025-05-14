@@ -19,17 +19,18 @@ const (
 )
 
 type EngineApp struct {
-	log     *log.Logger
-	redis   *redis.Client
-	ipcRx   *IPCRx
-	ipcTx   *IPCTx
-	battery *Battery
-	ecu     ecu.ECUInterface // New ECU interface
-	diag    *Diag
-	kers    *KERS
-	mu      sync.Mutex
-	ctx     context.Context
-	cancel  context.CancelFunc
+	log       *log.Logger
+	redis     *redis.Client
+	ipcRx     *IPCRx
+	ipcTx     *IPCTx
+	battery   *Battery
+	ecu       ecu.ECUInterface // New ECU interface
+	diag      *Diag
+	kers      *KERS
+	mu        sync.Mutex
+	ctx       context.Context
+	cancel    context.CancelFunc
+	lastSpeed uint16 // Track last sent speed
 }
 
 func NewEngineApp(opts *Options) (*EngineApp, error) {
@@ -144,15 +145,30 @@ func (h *frameHandler) Handle(frame can.Frame) {
 
 // Update Redis with current ECU state
 func (app *EngineApp) updateRedisState() {
+	app.mu.Lock()
+	defer app.mu.Unlock()
+
 	// Get current state from ECU
-	status1 := RedisStatus1{
-		MotorVoltage: app.ecu.GetVoltage(),
-		MotorCurrent: app.ecu.GetCurrent(),
-		RPM:          app.ecu.GetRPM(),
-		Speed:        app.ecu.GetSpeed(), // Direct assignment, as GetSpeed() already returns uint16
-		ThrottleOn:   app.ecu.GetThrottleOn(),
+	currentSpeed := app.ecu.GetSpeed()
+
+	// Only update if speed has changed
+	if currentSpeed != app.lastSpeed {
+		status1 := RedisStatus1{
+			MotorVoltage: app.ecu.GetVoltage(),
+			MotorCurrent: app.ecu.GetCurrent(),
+			RPM:          app.ecu.GetRPM(),
+			Speed:        currentSpeed,
+			ThrottleOn:   app.ecu.GetThrottleOn(),
+		}
+
+		if err := app.ipcTx.SendStatus1(status1); err != nil {
+			app.log.Printf("Failed to send Status1: %v", err)
+		} else {
+			app.lastSpeed = currentSpeed
+		}
 	}
 
+	// Always update other statuses as they might have changed
 	status2 := RedisStatus2{
 		Temperature: int(app.ecu.GetTemperature()),
 	}
@@ -163,11 +179,6 @@ func (app *EngineApp) updateRedisState() {
 
 	status4 := RedisStatus4{
 		KersOn: app.ecu.GetKersEnabled(),
-	}
-
-	// Send updates through IPC
-	if err := app.ipcTx.SendStatus1(status1); err != nil {
-		app.log.Printf("Failed to send Status1: %v", err)
 	}
 
 	if err := app.ipcTx.SendStatus2(status2); err != nil {
