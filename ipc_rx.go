@@ -52,7 +52,7 @@ func NewIPCRx(logger *log.Logger, redis *redis.Client, battery *Battery, kers *K
 func (rx *IPCRx) setupSubscriptions() error {
 	// Subscribe to vehicle updates
 	rx.vehicleSubscription = rx.redis.Subscribe(rx.ctx, "vehicle")
-	
+
 	// Start vehicle handler
 	go rx.handleVehicleSubscription()
 
@@ -60,7 +60,7 @@ func (rx *IPCRx) setupSubscriptions() error {
 	for i := 0; i < BatteryCount; i++ {
 		batteryChannel := fmt.Sprintf("battery:%d", i)
 		rx.batterySubscriptions[i] = rx.redis.Subscribe(rx.ctx, batteryChannel)
-		
+
 		// Start battery handler
 		go rx.handleBatterySubscription(i)
 	}
@@ -70,7 +70,7 @@ func (rx *IPCRx) setupSubscriptions() error {
 
 func (rx *IPCRx) handleVehicleSubscription() {
 	rx.log.Printf("Starting vehicle subscription handler")
-	
+
 	for {
 		msg, err := rx.vehicleSubscription.Receive(rx.ctx)
 		if err != nil {
@@ -84,7 +84,7 @@ func (rx *IPCRx) handleVehicleSubscription() {
 		switch m := msg.(type) {
 		case *redis.Message:
 			rx.log.Printf("Vehicle message received: channel=%s", m.Channel)
-			
+
 			// Check if state was updated
 			state, err := rx.redis.HGet(rx.ctx, "vehicle", "state").Result()
 			if err != nil && err != redis.Nil {
@@ -104,7 +104,7 @@ func (rx *IPCRx) handleVehicleSubscription() {
 
 func (rx *IPCRx) handleBatterySubscription(idx int) {
 	rx.log.Printf("Starting battery %d subscription handler", idx)
-	
+
 	for {
 		msg, err := rx.batterySubscriptions[idx].Receive(rx.ctx)
 		if err != nil {
@@ -118,11 +118,11 @@ func (rx *IPCRx) handleBatterySubscription(idx int) {
 		switch m := msg.(type) {
 		case *redis.Message:
 			rx.log.Printf("Battery %d message received: channel=%s", idx, m.Channel)
-			
+
 			batteryKey := fmt.Sprintf("battery:%d", idx)
 
 			state := BatteryState{}
-			
+
 			// Get active state
 			active, err := rx.redis.HGet(rx.ctx, batteryKey, "state").Result()
 			if err != nil && err != redis.Nil {
@@ -173,12 +173,14 @@ func (rx *IPCRx) readInitialStates() {
 	// Read battery states
 	for i := 0; i < BatteryCount; i++ {
 		batteryKey := fmt.Sprintf("battery:%d", i)
-		
+		batteryState := BatteryState{}
+
 		state, err := rx.redis.HGet(rx.ctx, batteryKey, "state").Result()
 		if err != nil && err != redis.Nil {
 			rx.log.Printf("Failed to read initial battery %d state: %v", i, err)
 		} else {
 			rx.log.Printf("Initial battery %d state: %s", i, state)
+			batteryState.Active = (state == "active")
 		}
 
 		tempState, err := rx.redis.HGet(rx.ctx, batteryKey, "temperature-state").Result()
@@ -186,14 +188,30 @@ func (rx *IPCRx) readInitialStates() {
 			rx.log.Printf("Failed to read initial battery %d temperature state: %v", i, err)
 		} else {
 			rx.log.Printf("Initial battery %d temperature state: %s", i, tempState)
+			switch tempState {
+			case "cold":
+				batteryState.TemperatureState = BatteryTemperatureStateCold
+			case "hot":
+				batteryState.TemperatureState = BatteryTemperatureStateHot
+			case "ideal":
+				batteryState.TemperatureState = BatteryTemperatureStateIdeal
+			default:
+				batteryState.TemperatureState = BatteryTemperatureStateUnknown
+			}
 		}
+
+		// Update battery state
+		rx.battery.Update(uint(i), batteryState)
 	}
+
+	// Update KERS with initial battery state
+	rx.kers.UpdateBattery(rx.battery.GetActiveTemperatureState())
 }
 
 func (rx *IPCRx) handleVehicleState(state string) {
 	var vehicleState VehicleState
 	if state == "ready-to-drive" {
-		vehicleState = VehicleStateEngineReady 
+		vehicleState = VehicleStateEngineReady
 		rx.log.Printf("Vehicle state changed to: ready-to-drive")
 	} else {
 		vehicleState = VehicleStateEngineNotReady
@@ -221,4 +239,3 @@ func (rx *IPCRx) Destroy() {
 		rx.vehicleSubscription.Close()
 	}
 }
-
