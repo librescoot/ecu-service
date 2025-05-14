@@ -10,10 +10,10 @@ import (
 )
 
 type IPCTx struct {
-	log    *log.Logger
-	redis  *redis.Client
-	mu     sync.Mutex
-	ctx    context.Context
+	log   *log.Logger
+	redis *redis.Client
+	mu    sync.Mutex
+	ctx   context.Context
 }
 
 func NewIPCTx(logger *log.Logger, redis *redis.Client) *IPCTx {
@@ -35,9 +35,10 @@ func (tx *IPCTx) SendStatus1(data RedisStatus1) error {
 	pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
 		"motor:voltage": data.MotorVoltage,
 		"motor:current": data.MotorCurrent,
-		"rpm":          data.RPM,
-		"speed":        data.Speed,
-		"throttle":     map[bool]string{true: "on", false: "off"}[data.ThrottleOn],
+		"rpm":           data.RPM,
+		"speed":         data.Speed,
+		"raw-speed":     data.RawSpeed,
+		"throttle":      map[bool]string{true: "on", false: "off"}[data.ThrottleOn],
 	})
 
 	_, err := pipe.Exec(tx.ctx)

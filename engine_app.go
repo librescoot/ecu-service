@@ -202,6 +202,7 @@ func (app *EngineApp) updateRedisState() {
 
 	// Get current state from ECU
 	currentSpeed := app.ecu.GetSpeed()
+	rawSpeed := app.ecu.GetRawSpeed()
 
 	// Only update if speed has changed
 	if currentSpeed != app.lastSpeed {
@@ -210,6 +211,7 @@ func (app *EngineApp) updateRedisState() {
 			MotorCurrent: app.ecu.GetCurrent(),
 			RPM:          app.ecu.GetRPM(),
 			Speed:        currentSpeed,
+			RawSpeed:     rawSpeed,
 			ThrottleOn:   app.ecu.GetThrottleOn(),
 		}
 

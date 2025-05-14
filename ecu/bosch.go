@@ -34,6 +34,7 @@ type BoschECU struct {
 
 	// State
 	speed       uint16
+	rawSpeed    uint16 // Store raw speed before calibration
 	rpm         uint16
 	voltage     int
 	current     int
@@ -95,8 +96,8 @@ func (b *BoschECU) handleStatus1Frame(frame can.Frame) error {
 	b.rpm = binary.BigEndian.Uint16(frame.Data[4:6])
 
 	// Speed with calibration
-	rawSpeed := uint16(frame.Data[6])
-	calibratedSpeed := float64(rawSpeed) * CalibrationFactor * SpeedToleranceFactor
+	b.rawSpeed = uint16(frame.Data[6]) // Store raw speed
+	calibratedSpeed := float64(b.rawSpeed) * CalibrationFactor * SpeedToleranceFactor
 	b.speed = uint16(calibratedSpeed)
 
 	if frame.Length >= 8 {
@@ -245,6 +246,12 @@ func (b *BoschECU) GetThrottleOn() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.throttleOn
+}
+
+func (b *BoschECU) GetRawSpeed() uint16 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.rawSpeed
 }
 
 func (b *BoschECU) Cleanup() {
