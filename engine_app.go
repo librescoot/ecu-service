@@ -113,18 +113,18 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 	}
 	app.log.Printf("Successfully connected to Redis")
 
-	// Write default values to Redis
-	app.writeDefaultRedisState()
-
-	// Start health check goroutine
-	go app.redisHealthCheck()
-
 	// Initialize components
 	app.battery = NewBattery(app.log)
 	app.log.Printf("Battery component initialized")
 
 	app.ipcTx = NewIPCTx(app.log, app.redis)
 	app.log.Printf("IPC TX component initialized")
+
+	// Write default values to Redis after ipcTx is initialized
+	app.writeDefaultRedisState()
+
+	// Start health check goroutine
+	go app.redisHealthCheck()
 
 	app.kers = NewKERS(app.log, ctx, app.ipcTx)
 	app.log.Printf("KERS component initialized")
