@@ -58,6 +58,9 @@ type ECUInterface interface {
 	// GetFaultCode returns the current fault code
 	GetFaultCode() uint32
 
+	// GetActiveFaults returns a map of currently active faults
+	GetActiveFaults() map[ECUFault]bool
+
 	// GetThrottleOn returns true if the throttle is currently active
 	GetThrottleOn() bool
 

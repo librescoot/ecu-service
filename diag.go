@@ -2,136 +2,139 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"log"
 	"sync"
+
+	"ecu-service/ecu"
 
 	"github.com/go-redis/redis/v8"
 )
 
-type DiagFault int
-
 const (
-	DiagFaultNone DiagFault = iota
-	DiagFaultBatteryOverVoltage
-	DiagFaultBatteryUnderVoltage
-	DiagFaultMotorShortCircuit
-	DiagFaultMotorStalled
-	DiagFaultHallSensorAbnormal
-	DiagFaultMosfetCheckError
-	DiagFaultMotorOpenCircuit
-	DiagFaultReserved8
-	DiagFaultReserved9
-	DiagFaultSelfCheckError
-	DiagFaultOverTemperature
-	DiagFaultThrottleAbnormal
-	DiagFaultMotorTemperatureProtection
-	DiagFaultThrottleActiveAtPowerUp
-	DiagFaultBrakingActive
-	DiagFaultInternal15VAbnormal
-	DiagFaultNum
+	diagGroupName           = "engine-ecu"
+	diagFaultSetKey         = "engine-ecu:fault"
+	diagEventStream         = "events:faults"
+	diagEventStreamMaxLen   = 1000
+	diagNotificationChannel = "engine-ecu"
 )
 
-var faultDescriptions = map[DiagFault]string{
-	DiagFaultBatteryOverVoltage:         "Battery over-voltage",
-	DiagFaultBatteryUnderVoltage:        "Battery under-voltage",
-	DiagFaultMotorShortCircuit:          "Motor short-circuit",
-	DiagFaultMotorStalled:               "Motor stalled",
-	DiagFaultHallSensorAbnormal:         "Hall sensor abnormal",
-	DiagFaultMosfetCheckError:           "MOSFET check error",
-	DiagFaultMotorOpenCircuit:           "Motor open-circuit",
-	DiagFaultReserved8:                  "Reserved",
-	DiagFaultReserved9:                  "Reserved",
-	DiagFaultSelfCheckError:             "Power-on self-check error",
-	DiagFaultOverTemperature:            "Over-temperature",
-	DiagFaultThrottleAbnormal:           "Throttle abnormal",
-	DiagFaultMotorTemperatureProtection: "Motor temperature protection",
-	DiagFaultThrottleActiveAtPowerUp:    "Throttle active at power up",
-	DiagFaultBrakingActive:              "Braking active at power up",
-	DiagFaultInternal15VAbnormal:        "Internal 15V abnormal",
-}
-
 type Diag struct {
-	log    *log.Logger
-	redis  *redis.Client
-	mu     sync.RWMutex
-	faults map[DiagFault]bool
-	ctx    context.Context
+	log          *log.Logger
+	redis        *redis.Client
+	mu           sync.RWMutex
+	faultStates  map[ecu.ECUFault]bool
+	ctx          context.Context
 }
 
 func NewDiag(logger *log.Logger, redis *redis.Client) *Diag {
 	return &Diag{
-		log:    logger,
-		redis:  redis,
-		faults: make(map[DiagFault]bool),
-		ctx:    context.Background(),
+		log:         logger,
+		redis:       redis,
+		faultStates: make(map[ecu.ECUFault]bool),
+		ctx:         context.Background(),
 	}
 }
 
 func (d *Diag) Destroy() {}
 
-func (d *Diag) SetFaultPresence(fault DiagFault, present bool) {
+func (d *Diag) SetFaultPresence(fault ecu.ECUFault, present bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.faults[fault] == present {
+	if fault == ecu.FaultNone {
 		return
 	}
 
-	d.faults[fault] = present
-
-	// Prepare diagnostic data
-	data := map[string]interface{}{
-		"fault":       int(fault),
-		"description": faultDescriptions[fault],
-		"present":     present,
-	}
-
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		d.log.Printf("Failed to marshal diagnostic data: %v", err)
+	wasPresent := d.faultStates[fault]
+	if wasPresent == present {
 		return
 	}
 
-	// Publish to Redis
-	channel := fmt.Sprintf("engine-ecu:diag:fault:%d", fault)
-	if err := d.redis.Publish(d.ctx, channel, jsonData).Err(); err != nil {
-		d.log.Printf("Failed to publish diagnostic data: %v", err)
+	d.faultStates[fault] = present
+
+	config, ok := ecu.GetFaultConfig(fault)
+	if !ok {
+		d.log.Printf("Unknown fault code: %d", fault)
+		return
+	}
+
+	if present {
+		d.log.Printf("Fault set: code=%d, description=%s", fault, config.Description)
+		d.reportFaultPresent(fault, config)
+	} else {
+		d.log.Printf("Fault cleared: code=%d, description=%s", fault, config.Description)
+		d.reportFaultAbsent(fault)
 	}
 }
 
-func (d *Diag) SetEngineFaultPresence(fault DiagFault) {
+func (d *Diag) SetFaults(faults map[ecu.ECUFault]bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Clear all faults
-	for f := range d.faults {
-		d.faults[f] = false
-	}
+	for fault := ecu.ECUFault(1); fault <= ecu.FaultInternal15vAbnormal; fault++ {
+		newPresent := faults[fault]
+		wasPresent := d.faultStates[fault]
 
-	// Set only the specified fault
-	if fault != DiagFaultNone {
-		d.faults[fault] = true
-	}
-
-	// Publish all fault states
-	for f := DiagFault(1); f < DiagFaultNum; f++ {
-		data := map[string]interface{}{
-			"fault":       int(f),
-			"description": faultDescriptions[f],
-			"present":     d.faults[f],
-		}
-
-		jsonData, err := json.Marshal(data)
-		if err != nil {
-			d.log.Printf("Failed to marshal diagnostic data: %v", err)
+		if newPresent == wasPresent {
 			continue
 		}
 
-		channel := fmt.Sprintf("engine-ecu:diag:fault:%d", f)
-		if err := d.redis.Publish(d.ctx, channel, jsonData).Err(); err != nil {
-			d.log.Printf("Failed to publish diagnostic data: %v", err)
+		d.faultStates[fault] = newPresent
+
+		config, ok := ecu.GetFaultConfig(fault)
+		if !ok {
+			continue
 		}
+
+		if newPresent {
+			d.log.Printf("Fault set: code=%d, description=%s", fault, config.Description)
+			d.reportFaultPresent(fault, config)
+		} else {
+			d.log.Printf("Fault cleared: code=%d, description=%s", fault, config.Description)
+			d.reportFaultAbsent(fault)
+		}
+	}
+}
+
+func (d *Diag) reportFaultPresent(fault ecu.ECUFault, config ecu.FaultConfig) {
+	pipe := d.redis.Pipeline()
+
+	pipe.SAdd(d.ctx, diagFaultSetKey, uint32(fault))
+
+	pipe.XAdd(d.ctx, &redis.XAddArgs{
+		Stream: diagEventStream,
+		MaxLen: diagEventStreamMaxLen,
+		Values: map[string]interface{}{
+			"group":       diagGroupName,
+			"code":        uint32(fault),
+			"description": config.Description,
+		},
+	})
+
+	pipe.Publish(d.ctx, diagNotificationChannel, "fault")
+
+	if _, err := pipe.Exec(d.ctx); err != nil {
+		d.log.Printf("Failed to report fault present: %v", err)
+	}
+}
+
+func (d *Diag) reportFaultAbsent(fault ecu.ECUFault) {
+	pipe := d.redis.Pipeline()
+
+	pipe.SRem(d.ctx, diagFaultSetKey, uint32(fault))
+
+	pipe.XAdd(d.ctx, &redis.XAddArgs{
+		Stream: diagEventStream,
+		MaxLen: diagEventStreamMaxLen,
+		Values: map[string]interface{}{
+			"group": diagGroupName,
+			"code":  -int32(fault),
+		},
+	})
+
+	pipe.Publish(d.ctx, diagNotificationChannel, "fault")
+
+	if _, err := pipe.Exec(d.ctx); err != nil {
+		d.log.Printf("Failed to report fault absent: %v", err)
 	}
 }

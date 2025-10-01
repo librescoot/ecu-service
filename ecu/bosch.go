@@ -236,6 +236,22 @@ func (b *BoschECU) GetFaultCode() uint32 {
 	return b.faultCode
 }
 
+func (b *BoschECU) GetActiveFaults() map[ECUFault]bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	faults := make(map[ECUFault]bool)
+
+	if b.faultCode != 0 {
+		fault := MapBoschFault(b.faultCode)
+		if fault != FaultNone {
+			faults[fault] = true
+		}
+	}
+
+	return faults
+}
+
 func (b *BoschECU) GetKersEnabled() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

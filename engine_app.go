@@ -247,10 +247,8 @@ func (app *EngineApp) updateRedisState() {
 		app.log.Printf("Failed to send Status4: %v", err)
 	}
 
-	// Update diagnostics if there's a fault
-	if faultCode := app.ecu.GetFaultCode(); faultCode != 0 {
-		app.diag.SetEngineFaultPresence(DiagFault(faultCode))
-	}
+	activeFaults := app.ecu.GetActiveFaults()
+	app.diag.SetFaults(activeFaults)
 }
 
 func (app *EngineApp) redisHealthCheck() {

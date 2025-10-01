@@ -171,6 +171,25 @@ func (v *VotolECU) GetFaultCode() uint32 {
 	return v.faultCode
 }
 
+func (v *VotolECU) GetActiveFaults() map[ECUFault]bool {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+
+	faults := make(map[ECUFault]bool)
+
+	for bit := 0; bit < 8; bit++ {
+		if (v.faultCode & (1 << bit)) != 0 {
+			votolCode := uint32(1 << bit)
+			fault := MapVotolFault(votolCode)
+			if fault != FaultNone {
+				faults[fault] = true
+			}
+		}
+	}
+
+	return faults
+}
+
 func (v *VotolECU) GetKersEnabled() bool {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
