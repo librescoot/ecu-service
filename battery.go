@@ -59,13 +59,13 @@ func (b *Battery) GetActiveTemperatureState() BatteryTemperatureState {
 
     // If battery 0 is active, return its temperature state
     if b.batteryData[0].Active && !b.batteryData[1].Active {
-        b.log.Printf("bat 0 active")
+        b.log.Printf("Battery 0 is active")
         return b.batteryData[0].TemperatureState
     }
 
     // If battery 1 is active, return its temperature state
     if b.batteryData[1].Active && !b.batteryData[0].Active {
-        b.log.Printf("bat 1 active")
+        b.log.Printf("Battery 1 is active")
         return b.batteryData[1].TemperatureState
     }
 
