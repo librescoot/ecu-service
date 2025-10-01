@@ -52,17 +52,25 @@ func main() {
 		log.Fatalf("invalid log level %d", *logLevel)
 	}
 
+	// Create logger - remove timestamp/prefix when running under systemd
+	var logger *log.Logger
+	if os.Getenv("INVOCATION_ID") != "" {
+		logger = log.New(os.Stdout, "", 0)
+	} else {
+		logger = log.New(os.Stdout, "", log.LstdFlags)
+	}
+
 	// Parse ECU type
 	var ecuTypeEnum ecu.ECUType
 	switch *ecuType {
 	case "bosch":
 		ecuTypeEnum = ecu.ECUTypeBosch
-		log.Printf("Selected ECU type: Bosch")
+		logger.Printf("Selected ECU type: Bosch")
 	case "votol":
 		ecuTypeEnum = ecu.ECUTypeVotol
-		log.Printf("Selected ECU type: Votol")
+		logger.Printf("Selected ECU type: Votol")
 	default:
-		log.Fatalf("invalid ECU type: %s (must be 'bosch' or 'votol')", *ecuType)
+		logger.Fatalf("invalid ECU type: %s (must be 'bosch' or 'votol')", *ecuType)
 	}
 
 	opts := &Options{
@@ -71,6 +79,7 @@ func main() {
 		RedisServerPort: uint16(*redisPort),
 		CANDevice:       *canDevice,
 		ECUType:         ecuTypeEnum,
+		Logger:          logger,
 	}
 
 	app, err := NewEngineApp(opts)
