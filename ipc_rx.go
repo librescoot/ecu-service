@@ -77,6 +77,11 @@ func (rx *IPCRx) handleVehicleSubscription() {
 			if err == context.Canceled {
 				return
 			}
+			// Check for closed client - panic to trigger systemd restart
+			if err.Error() == "redis: client is closed" {
+				rx.log.Printf("Redis connection lost on vehicle subscription - restarting service")
+				panic("Redis disconnected")
+			}
 			rx.log.Printf("Vehicle subscription error: %v", err)
 			continue
 		}
@@ -110,6 +115,11 @@ func (rx *IPCRx) handleBatterySubscription(idx int) {
 		if err != nil {
 			if err == context.Canceled {
 				return
+			}
+			// Check for closed client - panic to trigger systemd restart
+			if err.Error() == "redis: client is closed" {
+				rx.log.Printf("Redis connection lost on battery %d subscription - restarting service", idx)
+				panic("Redis disconnected")
 			}
 			rx.log.Printf("Battery %d subscription error: %v", idx, err)
 			continue
