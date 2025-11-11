@@ -11,10 +11,10 @@ import (
 
 const (
 	// Votol ECU CAN IDs
-	VotolDisplayControllerID = 0x1026105A
-	VotolVCUControllerID     = 0x10262001
-	VotolControllerDisplayID = 0x10261022
-	VotolControllerStatusID  = 0x10261023
+	VotolDisplayControllerID = 0x9026105A
+	VotolVCUControllerID     = 0x90262001
+	VotolControllerDisplayID = 0x90261022
+	VotolControllerStatusID  = 0x90261023
 
 	// Update rates
 	VotolDisplayRate = 250 // ms
@@ -81,12 +81,15 @@ func (v *VotolECU) handleDisplayControllerFrame(frame can.Frame) error {
 		return nil
 	}
 
+	// NOTE: This frame is not currently being received from the Votol ECU
+	// Speed is calculated from RPM in handleControllerDisplayFrame instead
+
 	// data5 contains speed (0-199 km/h)
 	v.rawSpeed = uint16(frame.Data[5]) // Store raw speed
 	v.speed = v.rawSpeed               // Votol speed is already calibrated
 
-	// data0-1 contain odometer low/high bytes
-	odo := binary.BigEndian.Uint16(frame.Data[0:2])
+	// data0-1 contain odometer low/high bytes (little-endian)
+	odo := binary.LittleEndian.Uint16(frame.Data[0:2])
 	v.odometer = uint32(odo) * 1000 // Convert to meters
 
 	return nil
@@ -97,15 +100,19 @@ func (v *VotolECU) handleControllerDisplayFrame(frame can.Frame) error {
 		return nil
 	}
 
-	// data2-3 contain RPM
-	v.rpm = binary.BigEndian.Uint16(frame.Data[2:4])
+	// data2-3 contain RPM (little-endian)
+	v.rpm = binary.LittleEndian.Uint16(frame.Data[2:4])
 
-	// data4-5 contain battery voltage (0.1V/bit)
-	voltageRaw := binary.BigEndian.Uint16(frame.Data[4:6])
+	// Calculate speed from RPM since Votol doesn't provide speed directly
+	v.rawSpeed = v.rpm
+	v.speed = uint16(float64(v.rpm) * RPMToSpeedFactor)
+
+	// data4-5 contain battery voltage (0.1V/bit, little-endian)
+	voltageRaw := binary.LittleEndian.Uint16(frame.Data[4:6])
 	v.voltage = int(voltageRaw) * 100 // Convert to mV
 
-	// data6-7 contain battery current (0.1A/bit)
-	currentRaw := binary.BigEndian.Uint16(frame.Data[6:8])
+	// data6-7 contain battery current (0.1A/bit, little-endian, signed for regen)
+	currentRaw := int16(binary.LittleEndian.Uint16(frame.Data[6:8]))
 	v.current = int(currentRaw) * 100 // Convert to mA
 
 	return nil

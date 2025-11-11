@@ -143,7 +143,7 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 		Logger:    app.log,
 		CANDevice: opts.CANDevice,
 		CANBus:    bus,
-		ECUType:   ecu.ECUTypeBosch, // Default to Bosch
+		ECUType:   opts.ECUType,
 	}
 
 	app.ecu = ecu.NewECU(opts.ECUType)
