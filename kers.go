@@ -166,8 +166,8 @@ func (k *KERS) HandleVehicleStateChange(state VehicleState) {
 	k.engineOnTimer.Stop()
 
 	if stateChanged && state == VehicleStateEngineReady {
-		k.log.Printf("Ready to drive -> awaiting 'Engine ON' ... (%f s)",
-			KersEngineOnDelayS)
+		k.log.Printf("Ready to drive -> awaiting 'Engine ON' ... (%.1f s)",
+			KersEngineOnDelayS.Seconds())
 		k.vehicleState = state // EXPLICITLY set the new state
 		k.engineOnTimer.Reset(KersEngineOnDelayS)
 	} else {
