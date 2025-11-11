@@ -23,6 +23,9 @@ const (
 	KersCurrent          = 10000 // 10A
 	BoschGearModeEnable  = true
 	BoschBoostModeEnable = false
+
+	// Odometer calibration factor (as applied by unu service)
+	OdometerCalibrationFactor = 1.07
 )
 
 type BoschECU struct {
@@ -130,7 +133,7 @@ func (b *BoschECU) handleStatus3Frame(frame can.Frame) error {
 
 	// Odometer (meters) - converting from 0.1km steps
 	rawOdometer := binary.BigEndian.Uint32(frame.Data[0:4])
-	b.odometer = rawOdometer * 100
+	b.odometer = uint32(float64(rawOdometer) * OdometerCalibrationFactor * 100)
 
 	return nil
 }
