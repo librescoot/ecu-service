@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"sync"
 	"time"
 )
@@ -25,7 +24,7 @@ const (
 )
 
 type KERS struct {
-	log              *log.Logger
+	log              *LeveledLogger
 	ipcTx            *IPCTx
 	kersCallback     func(bool) error
 	temperatureState BatteryTemperatureState
@@ -37,7 +36,7 @@ type KERS struct {
 	ctx              context.Context
 }
 
-func NewKERS(logger *log.Logger, ctx context.Context, ipcTx *IPCTx) *KERS {
+func NewKERS(logger *LeveledLogger, ctx context.Context, ipcTx *IPCTx) *KERS {
 	k := &KERS{
 		log:              logger,
 		ctx:              ctx,

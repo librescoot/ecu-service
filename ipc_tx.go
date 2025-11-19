@@ -3,20 +3,19 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 
 	"github.com/go-redis/redis/v8"
 )
 
 type IPCTx struct {
-	log   *log.Logger
+	log   *LeveledLogger
 	redis *redis.Client
 	mu    sync.Mutex
 	ctx   context.Context
 }
 
-func NewIPCTx(logger *log.Logger, redis *redis.Client) *IPCTx {
+func NewIPCTx(logger *LeveledLogger, redis *redis.Client) *IPCTx {
 	return &IPCTx{
 		log:   logger,
 		redis: redis,

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"sync"
 )
 
@@ -22,12 +21,12 @@ type BatteryState struct {
 }
 
 type Battery struct {
-	log         *log.Logger
+	log         *LeveledLogger
 	batteryData [BatteryCount]BatteryState
 	mu          sync.RWMutex
 }
 
-func NewBattery(logger *log.Logger) *Battery {
+func NewBattery(logger *LeveledLogger) *Battery {
 	return &Battery{
 		log: logger,
 	}

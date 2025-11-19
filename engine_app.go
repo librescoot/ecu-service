@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -19,7 +18,7 @@ const (
 )
 
 type EngineApp struct {
-	log       *log.Logger
+	log       *LeveledLogger
 	redis     *redis.Client
 	ipcRx     *IPCRx
 	ipcTx     *IPCTx
@@ -123,8 +122,9 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 	// Write default values to Redis after ipcTx is initialized
 	app.writeDefaultRedisState()
 
-	// Start health check goroutine
+	// Start health check goroutines
 	go app.redisHealthCheck()
+	go app.ecuStaleDataCheck()
 
 	app.kers = NewKERS(app.log, ctx, app.ipcTx)
 	app.log.Printf("KERS component initialized")
@@ -186,8 +186,11 @@ type frameHandler struct {
 }
 
 func (h *frameHandler) Handle(frame can.Frame) {
+	// Log incoming CAN frame at DEBUG level
+	h.app.log.DebugCAN("RX", frame.ID, frame.Data[:], frame.Length)
+
 	if err := h.app.ecu.HandleFrame(frame); err != nil {
-		h.app.log.Printf("Error handling CAN frame: %v", err)
+		h.app.log.Error("Error handling CAN frame: %v", err)
 		return
 	}
 
@@ -265,6 +268,41 @@ func (app *EngineApp) redisHealthCheck() {
 				app.log.Printf("Redis health check failed: %v", err)
 			}
 			cancel()
+		}
+	}
+}
+
+func (app *EngineApp) ecuStaleDataCheck() {
+	// Check every 500ms for stale ECU data
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-app.ctx.Done():
+			return
+		case <-ticker.C:
+			if app.ecu.IsDataStale() {
+				app.mu.Lock()
+				// Reset speed to 0 when data is stale
+				if app.lastSpeed != 0 {
+					app.log.Printf("ECU data stale, resetting speed to 0")
+					status1 := RedisStatus1{
+						MotorVoltage: 0,
+						MotorCurrent: 0,
+						RPM:          0,
+						Speed:        0,
+						RawSpeed:     0,
+						ThrottleOn:   false,
+					}
+					if err := app.ipcTx.SendStatus1(status1); err != nil {
+						app.log.Printf("Failed to send stale status: %v", err)
+					} else {
+						app.lastSpeed = 0
+					}
+				}
+				app.mu.Unlock()
+			}
 		}
 	}
 }

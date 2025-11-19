@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"sync"
 
 	"ecu-service/ecu"
@@ -19,14 +18,14 @@ const (
 )
 
 type Diag struct {
-	log          *log.Logger
+	log          *LeveledLogger
 	redis        *redis.Client
 	mu           sync.RWMutex
 	faultStates  map[ecu.ECUFault]bool
 	ctx          context.Context
 }
 
-func NewDiag(logger *log.Logger, redis *redis.Client) *Diag {
+func NewDiag(logger *LeveledLogger, redis *redis.Client) *Diag {
 	return &Diag{
 		log:         logger,
 		redis:       redis,

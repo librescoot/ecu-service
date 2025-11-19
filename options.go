@@ -2,7 +2,6 @@ package main
 
 import (
     "ecu-service/ecu"
-    "log"
 )
 
 type LogLevel int
@@ -21,5 +20,5 @@ type Options struct {
     RedisServerPort  uint16
     CANDevice        string
     ECUType          ecu.ECUType
-    Logger           *log.Logger
+    Logger           *LeveledLogger
 }

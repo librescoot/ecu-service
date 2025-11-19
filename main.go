@@ -52,23 +52,26 @@ func main() {
 		log.Fatalf("invalid log level %d", *logLevel)
 	}
 
-	// Create logger - remove timestamp/prefix when running under systemd
-	var logger *log.Logger
+	// Create base logger - remove timestamp/prefix when running under systemd
+	var baseLogger *log.Logger
 	if os.Getenv("INVOCATION_ID") != "" {
-		logger = log.New(os.Stdout, "", 0)
+		baseLogger = log.New(os.Stdout, "", 0)
 	} else {
-		logger = log.New(os.Stdout, "", log.LstdFlags)
+		baseLogger = log.New(os.Stdout, "", log.LstdFlags)
 	}
+
+	// Create leveled logger wrapper
+	logger := NewLeveledLogger(baseLogger, LogLevel(*logLevel))
 
 	// Parse ECU type
 	var ecuTypeEnum ecu.ECUType
 	switch *ecuType {
 	case "bosch":
 		ecuTypeEnum = ecu.ECUTypeBosch
-		logger.Printf("Selected ECU type: Bosch")
+		logger.Info("Selected ECU type: Bosch")
 	case "votol":
 		ecuTypeEnum = ecu.ECUTypeVotol
-		logger.Printf("Selected ECU type: Votol")
+		logger.Info("Selected ECU type: Votol")
 	default:
 		logger.Fatalf("invalid ECU type: %s (must be 'bosch' or 'votol')", *ecuType)
 	}

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 
 	"github.com/go-redis/redis/v8"
@@ -12,7 +11,7 @@ import (
 const IpcRxBatteryNameSize = 16
 
 type IPCRx struct {
-	log     *log.Logger
+	log     *LeveledLogger
 	redis   *redis.Client
 	battery *Battery
 	kers    *KERS
@@ -24,7 +23,7 @@ type IPCRx struct {
 	vehicleSubscription  *redis.PubSub
 }
 
-func NewIPCRx(logger *log.Logger, redis *redis.Client, battery *Battery, kers *KERS) *IPCRx {
+func NewIPCRx(logger *LeveledLogger, redis *redis.Client, battery *Battery, kers *KERS) *IPCRx {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	rx := &IPCRx{
