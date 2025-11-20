@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/brutella/can"
 )
@@ -26,6 +27,10 @@ const (
 
 	// Odometer calibration factor (as applied by unu service)
 	OdometerCalibrationFactor = 1.07
+
+	// Maximum time delta for power integration (5 seconds)
+	// Prevents large energy accumulation during ECU off periods
+	MaxPowerDeltaSeconds = 5.0
 )
 
 type BoschECU struct {
@@ -46,6 +51,11 @@ type BoschECU struct {
 	faultCode   uint32
 	kersEnabled bool
 	throttleOn  bool
+
+	// Power metrics
+	energyConsumed  uint64    // Cumulative energy consumed in mWh
+	energyRecovered uint64    // Cumulative energy recovered in mWh
+	lastPowerUpdate time.Time // Last time power was calculated
 }
 
 func NewBoschECU() ECUInterface {
@@ -108,6 +118,9 @@ func (b *BoschECU) handleStatus1Frame(frame can.Frame) error {
 	} else {
 		b.throttleOn = false
 	}
+
+	// Update power metrics
+	b.updatePower()
 
 	return nil
 }
@@ -277,4 +290,63 @@ func (b *BoschECU) Cleanup() {
 	if b.cancel != nil {
 		b.cancel()
 	}
+}
+
+// updatePower calculates instantaneous power and integrates it over time
+// Must be called with mutex already locked
+func (b *BoschECU) updatePower() {
+	now := time.Now()
+
+	// Initialize lastPowerUpdate on first call
+	if b.lastPowerUpdate.IsZero() {
+		b.lastPowerUpdate = now
+		return
+	}
+
+	// Calculate time delta in seconds
+	dtSeconds := now.Sub(b.lastPowerUpdate).Seconds()
+
+	// Skip update if time delta is too large (ECU was off)
+	if dtSeconds > MaxPowerDeltaSeconds {
+		b.lastPowerUpdate = now
+		return
+	}
+
+	b.lastPowerUpdate = now
+
+	// Calculate instantaneous power in mW (voltage in mV, current in mA)
+	// Power (mW) = Voltage (mV) × Current (mA) / 1000
+	powerMW := int64(b.voltage) * int64(b.current) / 1000
+
+	// Integrate power over time to get energy in mWh
+	// Energy (mWh) = Power (mW) × Time (hours)
+	energyMWh := float64(powerMW) * (dtSeconds / 3600.0)
+
+	// Separate consumed vs recovered energy
+	if energyMWh > 0 {
+		// Positive power = consuming energy
+		b.energyConsumed += uint64(energyMWh)
+	} else {
+		// Negative power = recovering energy (regen braking)
+		b.energyRecovered += uint64(-energyMWh)
+	}
+}
+
+func (b *BoschECU) GetInstantPower() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	// Power (mW) = Voltage (mV) × Current (mA) / 1000
+	return b.voltage * b.current / 1000
+}
+
+func (b *BoschECU) GetEnergyConsumed() uint64 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.energyConsumed
+}
+
+func (b *BoschECU) GetEnergyRecovered() uint64 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.energyRecovered
 }

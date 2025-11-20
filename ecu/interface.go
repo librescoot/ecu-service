@@ -67,6 +67,15 @@ type ECUInterface interface {
 	// GetKersEnabled returns whether KERS is enabled
 	GetKersEnabled() bool
 
+	// GetInstantPower returns the current instantaneous power in mW
+	GetInstantPower() int
+
+	// GetEnergyConsumed returns the cumulative energy consumed in mWh
+	GetEnergyConsumed() uint64
+
+	// GetEnergyRecovered returns the cumulative energy recovered in mWh
+	GetEnergyRecovered() uint64
+
 	// Cleanup performs any necessary cleanup
 	Cleanup()
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/brutella/can"
 )
@@ -20,6 +21,10 @@ const (
 	VotolDisplayRate = 250 // ms
 	VotolControlRate = 100 // ms
 	VotolStatusRate  = 50  // ms
+
+	// Maximum time delta for power integration (5 seconds)
+	// Prevents large energy accumulation during ECU off periods
+	VotolMaxPowerDeltaSeconds = 5.0
 )
 
 type VotolECU struct {
@@ -40,6 +45,11 @@ type VotolECU struct {
 	faultCode   uint32
 	kersEnabled bool
 	throttleOn  bool // Votol ECU does not seem to report throttle, will default to false
+
+	// Power metrics
+	energyConsumed  uint64    // Cumulative energy consumed in mWh
+	energyRecovered uint64    // Cumulative energy recovered in mWh
+	lastPowerUpdate time.Time // Last time power was calculated
 }
 
 func NewVotolECU() ECUInterface {
@@ -114,6 +124,9 @@ func (v *VotolECU) handleControllerDisplayFrame(frame can.Frame) error {
 	// data6-7 contain battery current (0.1A/bit, little-endian, signed for regen)
 	currentRaw := int16(binary.LittleEndian.Uint16(frame.Data[6:8]))
 	v.current = int(currentRaw) * 100 // Convert to mA
+
+	// Update power metrics
+	v.updatePower()
 
 	return nil
 }
@@ -230,4 +243,63 @@ func (v *VotolECU) GetRawSpeed() uint16 {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	return v.rawSpeed
+}
+
+// updatePower calculates instantaneous power and integrates it over time
+// Must be called with mutex already locked
+func (v *VotolECU) updatePower() {
+	now := time.Now()
+
+	// Initialize lastPowerUpdate on first call
+	if v.lastPowerUpdate.IsZero() {
+		v.lastPowerUpdate = now
+		return
+	}
+
+	// Calculate time delta in seconds
+	dtSeconds := now.Sub(v.lastPowerUpdate).Seconds()
+
+	// Skip update if time delta is too large (ECU was off)
+	if dtSeconds > VotolMaxPowerDeltaSeconds {
+		v.lastPowerUpdate = now
+		return
+	}
+
+	v.lastPowerUpdate = now
+
+	// Calculate instantaneous power in mW (voltage in mV, current in mA)
+	// Power (mW) = Voltage (mV) × Current (mA) / 1000
+	powerMW := int64(v.voltage) * int64(v.current) / 1000
+
+	// Integrate power over time to get energy in mWh
+	// Energy (mWh) = Power (mW) × Time (hours)
+	energyMWh := float64(powerMW) * (dtSeconds / 3600.0)
+
+	// Separate consumed vs recovered energy
+	if energyMWh > 0 {
+		// Positive power = consuming energy
+		v.energyConsumed += uint64(energyMWh)
+	} else {
+		// Negative power = recovering energy (regen braking)
+		v.energyRecovered += uint64(-energyMWh)
+	}
+}
+
+func (v *VotolECU) GetInstantPower() int {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	// Power (mW) = Voltage (mV) × Current (mA) / 1000
+	return v.voltage * v.current / 1000
+}
+
+func (v *VotolECU) GetEnergyConsumed() uint64 {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.energyConsumed
+}
+
+func (v *VotolECU) GetEnergyRecovered() uint64 {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.energyRecovered
 }
