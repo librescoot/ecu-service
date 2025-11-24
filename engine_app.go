@@ -160,10 +160,6 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 		return app.ecu.SetKersEnabled(enabled)
 	})
 
-	app.kers.SetStatusRequestCallback(func() error {
-		return app.ecu.SendStatusRequest()
-	})
-
 	// Create frame handler for CAN messages
 	handler := &frameHandler{app: app}
 	bus.Subscribe(handler)

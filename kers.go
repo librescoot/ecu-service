@@ -7,7 +7,6 @@ import (
 )
 
 const KersEngineOnDelayS = time.Second + 500*time.Millisecond
-const StatusRequestDelayS = time.Second
 
 type KersReasonOff int
 
@@ -25,19 +24,16 @@ const (
 )
 
 type KERS struct {
-	log                   *LeveledLogger
-	ipcTx                 *IPCTx
-	kersCallback          func(bool) error
-	statusRequestCallback func() error
-	temperatureState      BatteryTemperatureState
-	kersReasonOff         KersReasonOff
-	vehicleStopped        bool
-	vehicleState          VehicleState
-	ecuEnabled            bool
-	engineOnTimer         *time.Timer
-	statusRequestTimer    *time.Timer
-	mu                    sync.RWMutex
-	ctx                   context.Context
+	log              *LeveledLogger
+	ipcTx            *IPCTx
+	kersCallback     func(bool) error
+	temperatureState BatteryTemperatureState
+	kersReasonOff    KersReasonOff
+	vehicleStopped   bool
+	vehicleState     VehicleState
+	engineOnTimer    *time.Timer
+	mu               sync.RWMutex
+	ctx              context.Context
 }
 
 func NewKERS(logger *LeveledLogger, ctx context.Context, ipcTx *IPCTx) *KERS {
@@ -49,14 +45,10 @@ func NewKERS(logger *LeveledLogger, ctx context.Context, ipcTx *IPCTx) *KERS {
 		kersReasonOff:    KersReasonOffNone,
 		vehicleStopped:   true,
 		vehicleState:     VehicleStateEngineNotReady,
-		ecuEnabled:       false,
 	}
 
 	k.engineOnTimer = time.NewTimer(KersEngineOnDelayS)
 	k.engineOnTimer.Stop()
-
-	k.statusRequestTimer = time.NewTimer(StatusRequestDelayS)
-	k.statusRequestTimer.Stop()
 
 	go k.timerLoop()
 
@@ -66,9 +58,6 @@ func NewKERS(logger *LeveledLogger, ctx context.Context, ipcTx *IPCTx) *KERS {
 func (k *KERS) Destroy() {
 	if k.engineOnTimer != nil {
 		k.engineOnTimer.Stop()
-	}
-	if k.statusRequestTimer != nil {
-		k.statusRequestTimer.Stop()
 	}
 }
 
@@ -83,15 +72,6 @@ func (k *KERS) timerLoop() {
 			k.vehicleState = VehicleStateEngineReady
 			k.updateKers()
 			k.mu.Unlock()
-		case <-k.statusRequestTimer.C:
-			k.mu.Lock()
-			k.log.Info("Status request timer expired -> requesting ECU status")
-			if k.statusRequestCallback != nil {
-				if err := k.statusRequestCallback(); err != nil {
-					k.log.Error("Error sending status request: %v", err)
-				}
-			}
-			k.mu.Unlock()
 		}
 	}
 }
@@ -102,30 +82,6 @@ func (k *KERS) SetKersEnabledCallback(callback func(bool) error) {
 
 	// Store the error-returning function directly
 	k.kersCallback = callback
-}
-
-func (k *KERS) SetStatusRequestCallback(callback func() error) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-
-	k.statusRequestCallback = callback
-}
-
-func (k *KERS) HandleECUEnabled(enabled bool) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-
-	wasEnabled := k.ecuEnabled
-	k.ecuEnabled = enabled
-
-	// If transitioning from disabled to enabled, start the status request timer
-	if enabled && !wasEnabled {
-		k.log.Info("ECU enabled -> starting status request timer (%.1f s)", StatusRequestDelayS.Seconds())
-		k.statusRequestTimer.Reset(StatusRequestDelayS)
-	} else if !enabled && wasEnabled {
-		k.log.Info("ECU disabled -> stopping status request timer")
-		k.statusRequestTimer.Stop()
-	}
 }
 
 func (k *KERS) enableDisableKers(enable bool) {

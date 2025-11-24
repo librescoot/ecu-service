@@ -218,12 +218,6 @@ func (v *VotolECU) SetKersEnabled(enabled bool) error {
 	return nil
 }
 
-func (v *VotolECU) SendStatusRequest() error {
-	// Votol ECU does not support status request command
-	// Status messages are sent automatically
-	return nil
-}
-
 func (v *VotolECU) Cleanup() {
 	if v.cancel != nil {
 		v.cancel()

@@ -225,10 +225,6 @@ func (rx *IPCRx) handleVehicleState(state string) {
 		rx.log.Info("Vehicle state changed to: %s", state)
 	}
 
-	// ECU is enabled in parked and ready-to-drive states
-	ecuEnabled := state == "parked" || state == "ready-to-drive"
-	rx.kers.HandleECUEnabled(ecuEnabled)
-
 	rx.kers.HandleVehicleStateChange(vehicleState)
 }
 

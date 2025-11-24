@@ -195,24 +195,6 @@ func (b *BoschECU) SetKersEnabled(enabled bool) error {
 	return nil
 }
 
-func (b *BoschECU) SendStatusRequest() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	b.logger.Info("Sending status request (0x4EF) to ECU")
-
-	frame := can.Frame{
-		ID:     BoschStatusRequestFrameID,
-		Length: 1,
-		Data:   [8]byte{0x01}, // report_all_ecu_settings = 1
-	}
-
-	// Log outgoing CAN frame
-	DebugCANFrame(b.logger, "TX", frame.ID, frame.Data, frame.Length)
-
-	return b.bus.Publish(frame)
-}
-
 // Implement getters
 func (b *BoschECU) GetSpeed() uint16 {
 	b.mu.RLock()
