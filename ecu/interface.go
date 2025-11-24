@@ -33,6 +33,9 @@ type ECUInterface interface {
 	// SetKersEnabled enables/disables KERS functionality
 	SetKersEnabled(enabled bool) error
 
+	// SendStatusRequest sends a status request (0x4EF) to trigger ECU to send all status messages
+	SendStatusRequest() error
+
 	// GetSpeed returns the current speed in km/h
 	GetSpeed() uint16
 
