@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"sync"
 )
 
@@ -22,12 +21,12 @@ type BatteryState struct {
 }
 
 type Battery struct {
-	log         *log.Logger
+	log         *LeveledLogger
 	batteryData [BatteryCount]BatteryState
 	mu          sync.RWMutex
 }
 
-func NewBattery(logger *log.Logger) *Battery {
+func NewBattery(logger *LeveledLogger) *Battery {
 	return &Battery{
 		log: logger,
 	}
@@ -39,10 +38,10 @@ func (b *Battery) Update(idx uint, data BatteryState) {
     b.mu.Lock()
     defer b.mu.Unlock()
 
-    b.log.Printf("DETAILED: Updating battery %d with state: active=%v, temperature_state=%v", idx, data.Active, data.TemperatureState)
+    b.log.Debug("Updating battery %d with state: active=%v, temperature_state=%v", idx, data.Active, data.TemperatureState)
 
     if idx >= BatteryCount {
-        b.log.Printf("Invalid battery index: %d (num batteries: %d)", idx, BatteryCount)
+        b.log.Error("Invalid battery index: %d (num batteries: %d)", idx, BatteryCount)
         return
     }
 
@@ -53,19 +52,19 @@ func (b *Battery) GetActiveTemperatureState() BatteryTemperatureState {
     b.mu.RLock()
     defer b.mu.RUnlock()
 
-    b.log.Printf("DETAILED: GetActiveTemperatureState called")
-    b.log.Printf("DETAILED: Battery 0 state: active=%v, temperature_state=%v", b.batteryData[0].Active, b.batteryData[0].TemperatureState)
-    b.log.Printf("DETAILED: Battery 1 state: active=%v, temperature_state=%v", b.batteryData[1].Active, b.batteryData[1].TemperatureState)
+    b.log.Debug("GetActiveTemperatureState called")
+    b.log.Debug("Battery 0 state: active=%v, temperature_state=%v", b.batteryData[0].Active, b.batteryData[0].TemperatureState)
+    b.log.Debug("Battery 1 state: active=%v, temperature_state=%v", b.batteryData[1].Active, b.batteryData[1].TemperatureState)
 
     // If battery 0 is active, return its temperature state
     if b.batteryData[0].Active && !b.batteryData[1].Active {
-        b.log.Printf("Battery 0 is active")
+        b.log.Debug("Battery 0 is active")
         return b.batteryData[0].TemperatureState
     }
 
     // If battery 1 is active, return its temperature state
     if b.batteryData[1].Active && !b.batteryData[0].Active {
-        b.log.Printf("Battery 1 is active")
+        b.log.Debug("Battery 1 is active")
         return b.batteryData[1].TemperatureState
     }
 

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"sync"
 	"time"
 )
@@ -25,7 +24,7 @@ const (
 )
 
 type KERS struct {
-	log              *log.Logger
+	log              *LeveledLogger
 	ipcTx            *IPCTx
 	kersCallback     func(bool) error
 	temperatureState BatteryTemperatureState
@@ -37,7 +36,7 @@ type KERS struct {
 	ctx              context.Context
 }
 
-func NewKERS(logger *log.Logger, ctx context.Context, ipcTx *IPCTx) *KERS {
+func NewKERS(logger *LeveledLogger, ctx context.Context, ipcTx *IPCTx) *KERS {
 	k := &KERS{
 		log:              logger,
 		ctx:              ctx,
@@ -48,7 +47,7 @@ func NewKERS(logger *log.Logger, ctx context.Context, ipcTx *IPCTx) *KERS {
 		vehicleState:     VehicleStateEngineNotReady,
 	}
 
-	k.engineOnTimer = time.NewTimer(KersEngineOnDelayS * time.Second)
+	k.engineOnTimer = time.NewTimer(KersEngineOnDelayS)
 	k.engineOnTimer.Stop()
 
 	go k.timerLoop()
@@ -69,7 +68,7 @@ func (k *KERS) timerLoop() {
 			return
 		case <-k.engineOnTimer.C:
 			k.mu.Lock()
-			k.log.Printf("Engine ON (timer callback) -> updating KERS")
+			k.log.Info("Engine ON (timer callback) -> updating KERS")
 			k.vehicleState = VehicleStateEngineReady
 			k.updateKers()
 			k.mu.Unlock()
@@ -90,9 +89,9 @@ func (k *KERS) enableDisableKers(enable bool) {
 	defer k.mu.Unlock()
 
 	if k.kersCallback != nil {
-		k.log.Printf("Setting ECU EBS to: %v", enable)
+		k.log.Info("Setting ECU EBS to: %v", enable)
 		if err := k.kersCallback(enable); err != nil {
-			k.log.Printf("Error setting KERS: %v", err)
+			k.log.Error("Error setting KERS: %v", err)
 		}
 	}
 }
@@ -106,31 +105,31 @@ func (k *KERS) updateKers() {
 	case BatteryTemperatureStateIdeal:
 		k.kersReasonOff = KersReasonOffNone
 	case BatteryTemperatureStateUnknown:
-		k.log.Printf("update_kers: battery state 'unknown' -> not updating.")
+		k.log.Debug("update_kers: battery state 'unknown' -> not updating.")
 		return
 	}
 
-	k.log.Printf("DETAILED updateKers: temperature=%s, vehicleStopped=%v, vehicleState=%v, kersReasonOff=%s",
+	k.log.Debug("updateKers: temperature=%s, vehicleStopped=%v, vehicleState=%v, kersReasonOff=%s",
 		k.stringifyBatteryTemperatureState(),
 		k.vehicleStopped,
 		k.vehicleState,
 		k.stringifyKersReasonOff())
 
 	if k.vehicleStopped {
-		k.log.Printf("Updating KERS: kers-reason-off=%s",
+		k.log.Debug("Updating KERS: kers-reason-off=%s",
 			k.stringifyKersReasonOff())
 
 		if err := k.ipcTx.SendKersReasonOff(k.kersReasonOff); err != nil {
-			k.log.Printf("Failed to send KERS reason off: %v", err)
+			k.log.Error("Failed to send KERS reason off: %v", err)
 		}
 
 		if k.vehicleState == VehicleStateEngineReady {
 			k.enableDisableKers(k.kersReasonOff == KersReasonOffNone)
 		} else {
-			k.log.Printf("ECU not enabled. Not setting KERS (yet).")
+			k.log.Debug("ECU not enabled. Not setting KERS (yet).")
 		}
 	} else {
-		k.log.Printf("Vehicle not stopped. Not updating KERS (yet)")
+		k.log.Debug("Vehicle not stopped. Not updating KERS (yet)")
 	}
 }
 
@@ -138,8 +137,8 @@ func (k *KERS) UpdateBattery(state BatteryTemperatureState) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
-	k.log.Printf("DETAILED: UpdateBattery called with state: %v", state)
-	k.log.Printf("DETAILED: Current temperature state: %v, Reason off: %v",
+	k.log.Debug("UpdateBattery called with state: %v", state)
+	k.log.Debug("Current temperature state: %v, Reason off: %v",
 		k.temperatureState, k.kersReasonOff)
 
 	if k.temperatureState == state {
@@ -147,7 +146,7 @@ func (k *KERS) UpdateBattery(state BatteryTemperatureState) {
 	}
 
 	k.temperatureState = state
-	k.log.Printf("Battery temperature-state updated: %s",
+	k.log.Info("Battery temperature-state updated: %s",
 		k.stringifyBatteryTemperatureState())
 	k.updateKers()
 }
@@ -156,17 +155,17 @@ func (k *KERS) HandleVehicleStateChange(state VehicleState) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
-	k.log.Printf("DETAILED: HandleVehicleStateChange BEFORE - current state: %v, new state: %v",
+	k.log.Debug("HandleVehicleStateChange BEFORE - current state: %v, new state: %v",
 		k.vehicleState, state)
 
 	stateChanged := k.vehicleState != state
-	k.log.Printf("Setting engine state to: %s",
+	k.log.Debug("Setting engine state to: %s",
 		k.stringifyVehicleState())
 
 	k.engineOnTimer.Stop()
 
 	if stateChanged && state == VehicleStateEngineReady {
-		k.log.Printf("Ready to drive -> awaiting 'Engine ON' ... (%.1f s)",
+		k.log.Info("Ready to drive -> awaiting 'Engine ON' ... (%.1f s)",
 			KersEngineOnDelayS.Seconds())
 		k.vehicleState = state // EXPLICITLY set the new state
 		k.engineOnTimer.Reset(KersEngineOnDelayS)
@@ -174,7 +173,7 @@ func (k *KERS) HandleVehicleStateChange(state VehicleState) {
 		k.vehicleState = state // Always set the state
 	}
 
-	k.log.Printf("DETAILED: HandleVehicleStateChange AFTER - current state: %v", k.vehicleState)
+	k.log.Debug("HandleVehicleStateChange AFTER - current state: %v", k.vehicleState)
 
 	// Force an update of KERS state
 	k.updateKers()
@@ -184,15 +183,15 @@ func (k *KERS) UpdateVehicleStopped(stopped bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
-	k.log.Printf("DETAILED: UpdateVehicleStopped called with value: %v", stopped)
-	k.log.Printf("DETAILED: Current vehicle state before update: stopped=%v, vehicleState=%v",
+	k.log.Debug("UpdateVehicleStopped called with value: %v", stopped)
+	k.log.Debug("Current vehicle state before update: stopped=%v, vehicleState=%v",
 		k.vehicleStopped, k.vehicleState)
 
 	stoppedChanged := k.vehicleStopped != stopped
 	k.vehicleStopped = stopped
 
 	if stoppedChanged && stopped {
-		k.log.Printf("Vehicle stopped -> updating KERS")
+		k.log.Info("Vehicle stopped -> updating KERS")
 		k.updateKers()
 	}
 }
@@ -201,10 +200,10 @@ func (k *KERS) UpdateECUKers(kersActive bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
-	k.log.Printf("ECU-kers is %s", map[bool]string{true: "enabled", false: "disabled"}[kersActive])
+	k.log.Debug("ECU-kers is %s", map[bool]string{true: "enabled", false: "disabled"}[kersActive])
 
 	if kersActive && (k.kersReasonOff != KersReasonOffNone) {
-		k.log.Printf("ECU-kers is enabled, despite kers-reason-off=%s -> updating KERS",
+		k.log.Warn("ECU-kers is enabled, despite kers-reason-off=%s -> updating KERS",
 			k.stringifyKersReasonOff())
 		k.updateKers()
 	}

@@ -3,7 +3,6 @@ package ecu
 import (
 	"context"
 	"encoding/binary"
-	"log"
 	"sync"
 
 	"github.com/brutella/can"
@@ -24,7 +23,7 @@ const (
 
 type VotolECU struct {
 	mu     sync.RWMutex
-	logger *log.Logger
+	logger Logger
 	bus    *can.Bus
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -56,7 +55,7 @@ func (v *VotolECU) Initialize(ctx context.Context, config ECUConfig) error {
 	// Create cancellable context
 	v.ctx, v.cancel = context.WithCancel(ctx)
 
-	v.logger.Printf("Initialized Votol ECU")
+	v.logger.Info("Initialized Votol ECU")
 	return nil
 }
 
@@ -230,4 +229,10 @@ func (v *VotolECU) GetRawSpeed() uint16 {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	return v.rawSpeed
+}
+
+// IsDataStale returns false for Votol (stale data detection not implemented yet)
+func (v *VotolECU) IsDataStale() bool {
+	// TODO: Implement stale data detection for Votol ECU
+	return false
 }

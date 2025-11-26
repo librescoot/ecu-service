@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -19,7 +18,7 @@ const (
 )
 
 type EngineApp struct {
-	log       *log.Logger
+	log       *LeveledLogger
 	redis     *redis.Client
 	ipcRx     *IPCRx
 	ipcTx     *IPCTx
@@ -64,22 +63,22 @@ func (app *EngineApp) writeDefaultRedisState() {
 
 	// Write all default values to Redis
 	if err := app.ipcTx.SendStatus1(status1); err != nil {
-		app.log.Printf("Failed to send default Status1: %v", err)
+		app.log.Error("Failed to send default Status1: %v", err)
 	}
 
 	if err := app.ipcTx.SendStatus2(status2); err != nil {
-		app.log.Printf("Failed to send default Status2: %v", err)
+		app.log.Error("Failed to send default Status2: %v", err)
 	}
 
 	if err := app.ipcTx.SendStatus3(status3); err != nil {
-		app.log.Printf("Failed to send default Status3: %v", err)
+		app.log.Error("Failed to send default Status3: %v", err)
 	}
 
 	if err := app.ipcTx.SendStatus4(status4); err != nil {
-		app.log.Printf("Failed to send default Status4: %v", err)
+		app.log.Error("Failed to send default Status4: %v", err)
 	}
 
-	app.log.Printf("Default Redis state written")
+	app.log.Debug("Default Redis state written")
 }
 
 func NewEngineApp(opts *Options) (*EngineApp, error) {
@@ -105,32 +104,33 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 	connectCtx, connectCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer connectCancel()
 
-	app.log.Printf("Connecting to Redis at %s:%d...", opts.RedisServerAddr, opts.RedisServerPort)
+	app.log.Info("Connecting to Redis at %s:%d...", opts.RedisServerAddr, opts.RedisServerPort)
 
 	if err := app.redis.Ping(connectCtx).Err(); err != nil {
-		app.log.Printf("Failed to connect to Redis: %v", err)
+		app.log.Error("Failed to connect to Redis: %v", err)
 		return nil, fmt.Errorf("failed to connect to Redis: %v", err)
 	}
-	app.log.Printf("Successfully connected to Redis")
+	app.log.Info("Connected to Redis")
 
 	// Initialize components
 	app.battery = NewBattery(app.log)
-	app.log.Printf("Battery component initialized")
+	app.log.Debug("Battery component initialized")
 
 	app.ipcTx = NewIPCTx(app.log, app.redis)
-	app.log.Printf("IPC TX component initialized")
+	app.log.Debug("IPC TX component initialized")
 
 	// Write default values to Redis after ipcTx is initialized
 	app.writeDefaultRedisState()
 
-	// Start health check goroutine
+	// Start health check goroutines
 	go app.redisHealthCheck()
+	// Note: ecuStaleDataCheck removed - ECU pauses CAN during flash writes which triggered false positives
 
 	app.kers = NewKERS(app.log, ctx, app.ipcTx)
-	app.log.Printf("KERS component initialized")
+	app.log.Debug("KERS component initialized")
 
 	app.diag = NewDiag(app.log, app.redis)
-	app.log.Printf("Diagnostics component initialized")
+	app.log.Debug("Diagnostics component initialized")
 
 	// Initialize CAN bus
 	bus, err := can.NewBusForInterfaceWithName(opts.CANDevice)
@@ -154,7 +154,7 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 	if err := app.ecu.Initialize(ctx, ecuConfig); err != nil {
 		return nil, fmt.Errorf("failed to initialize ECU: %v", err)
 	}
-	app.log.Printf("ECU component initialized - selected ECU type: %v", opts.ECUType)
+	app.log.Info("ECU initialized: %v", opts.ECUType)
 
 	app.kers.SetKersEnabledCallback(func(enabled bool) error {
 		return app.ecu.SetKersEnabled(enabled)
@@ -167,7 +167,7 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 	// Start CAN message publishing
 	go func() {
 		if err := bus.ConnectAndPublish(); err != nil {
-			app.log.Printf("CAN bus publish error: %v", err)
+			app.log.Error("CAN bus publish error: %v", err)
 		}
 	}()
 
@@ -175,7 +175,7 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 	if app.ipcRx == nil {
 		return nil, fmt.Errorf("failed to initialize IPC RX")
 	}
-	app.log.Printf("IPC RX component initialized")
+	app.log.Debug("IPC RX component initialized")
 
 	return app, nil
 }
@@ -186,8 +186,11 @@ type frameHandler struct {
 }
 
 func (h *frameHandler) Handle(frame can.Frame) {
+	// Log incoming CAN frame at DEBUG level
+	h.app.log.DebugCAN("RX", frame.ID, frame.Data[:], frame.Length)
+
 	if err := h.app.ecu.HandleFrame(frame); err != nil {
-		h.app.log.Printf("Error handling CAN frame: %v", err)
+		h.app.log.Error("Error handling CAN frame: %v", err)
 		return
 	}
 
@@ -216,7 +219,7 @@ func (app *EngineApp) updateRedisState() {
 		}
 
 		if err := app.ipcTx.SendStatus1(status1); err != nil {
-			app.log.Printf("Failed to send Status1: %v", err)
+			app.log.Error("Failed to send Status1: %v", err)
 		} else {
 			app.lastSpeed = currentSpeed
 		}
@@ -236,15 +239,15 @@ func (app *EngineApp) updateRedisState() {
 	}
 
 	if err := app.ipcTx.SendStatus2(status2); err != nil {
-		app.log.Printf("Failed to send Status2: %v", err)
+		app.log.Error("Failed to send Status2: %v", err)
 	}
 
 	if err := app.ipcTx.SendStatus3(status3); err != nil {
-		app.log.Printf("Failed to send Status3: %v", err)
+		app.log.Error("Failed to send Status3: %v", err)
 	}
 
 	if err := app.ipcTx.SendStatus4(status4); err != nil {
-		app.log.Printf("Failed to send Status4: %v", err)
+		app.log.Error("Failed to send Status4: %v", err)
 	}
 
 	activeFaults := app.ecu.GetActiveFaults()
@@ -262,18 +265,19 @@ func (app *EngineApp) redisHealthCheck() {
 		case <-ticker.C:
 			ctx, cancel := context.WithTimeout(app.ctx, 2*time.Second)
 			if err := app.redis.Ping(ctx).Err(); err != nil {
-				app.log.Printf("Redis health check failed: %v", err)
+				app.log.Warn("Redis health check failed: %v", err)
 			}
 			cancel()
 		}
 	}
 }
 
+
 func (app *EngineApp) Destroy() {
 	app.mu.Lock()
 	defer app.mu.Unlock()
 
-	app.log.Printf("Shutting down engine application...")
+	app.log.Info("Shutting down...")
 
 	if app.cancel != nil {
 		app.cancel()
@@ -281,41 +285,33 @@ func (app *EngineApp) Destroy() {
 
 	if app.ipcRx != nil {
 		app.ipcRx.Destroy()
-		app.log.Printf("IPC RX shutdown complete")
 	}
 
 	if app.kers != nil {
 		app.kers.Destroy()
-		app.log.Printf("KERS shutdown complete")
 	}
 
 	if app.battery != nil {
 		app.battery.Destroy()
-		app.log.Printf("Battery shutdown complete")
 	}
 
 	if app.ecu != nil {
 		app.ecu.Cleanup()
-		app.log.Printf("ECU shutdown complete")
 	}
 
 	if app.diag != nil {
 		app.diag.Destroy()
-		app.log.Printf("Diagnostics shutdown complete")
 	}
 
 	if app.ipcTx != nil {
 		app.ipcTx.Destroy()
-		app.log.Printf("IPC TX shutdown complete")
 	}
 
 	if app.redis != nil {
 		if err := app.redis.Close(); err != nil {
-			app.log.Printf("Error closing Redis connection: %v", err)
-		} else {
-			app.log.Printf("Redis connection closed")
+			app.log.Error("Error closing Redis: %v", err)
 		}
 	}
 
-	app.log.Printf("Engine application shutdown complete")
+	app.log.Info("Shutdown complete")
 }

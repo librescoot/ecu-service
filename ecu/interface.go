@@ -2,7 +2,6 @@ package ecu
 
 import (
 	"context"
-	"log"
 
 	"github.com/brutella/can"
 )
@@ -17,7 +16,7 @@ const (
 
 // ECUConfig contains configuration for the ECU
 type ECUConfig struct {
-	Logger    *log.Logger
+	Logger    Logger
 	CANDevice string
 	CANBus    *can.Bus
 	ECUType   ECUType
@@ -67,6 +66,9 @@ type ECUInterface interface {
 	// GetKersEnabled returns whether KERS is enabled
 	GetKersEnabled() bool
 
+	// IsDataStale returns true if no data has been received recently
+	IsDataStale() bool
+
 	// Cleanup performs any necessary cleanup
 	Cleanup()
 }
@@ -74,13 +76,10 @@ type ECUInterface interface {
 func NewECU(ecuType ECUType) ECUInterface {
 	switch ecuType {
 	case ECUTypeBosch:
-		log.Printf("Creating Bosch ECU")
 		return NewBoschECU()
 	case ECUTypeVotol:
-		log.Printf("Creating Votol ECU")
 		return NewVotolECU()
 	default:
-		log.Printf("Unknown ECU type: %v", ecuType)
 		return nil
 	}
 }

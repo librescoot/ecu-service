@@ -3,20 +3,19 @@ package ecu
 import (
 	"context"
 	"encoding/binary"
-	"log"
-	"sync"
 
 	"github.com/brutella/can"
 )
 
 const (
 	// Bosch ECU CAN IDs
-	BoschStatus1FrameID   = 0x7E0
-	BoschStatus2FrameID   = 0x7E1
-	BoschStatus3FrameID   = 0x7E2
-	BoschStatus4FrameID   = 0x7E3
-	BoschEBSSetFrameID    = 0x4E2
-	BoschControlMessageID = 0x4E0
+	BoschStatus1FrameID        = 0x7E0
+	BoschStatus2FrameID        = 0x7E1
+	BoschStatus3FrameID        = 0x7E2
+	BoschStatus4FrameID        = 0x7E3
+	BoschEBSSetFrameID         = 0x4E2
+	BoschControlMessageID      = 0x4E0
+	BoschStatusRequestFrameID  = 0x4EF // Request all ECU status messages
 
 	// Constants for KERS
 	KersVoltage          = 56000 // 56V
@@ -29,11 +28,7 @@ const (
 )
 
 type BoschECU struct {
-	mu     sync.RWMutex
-	logger *log.Logger
-	bus    *can.Bus
-	ctx    context.Context
-	cancel context.CancelFunc
+	BaseECU
 
 	// State
 	speed       uint16
@@ -53,14 +48,10 @@ func NewBoschECU() ECUInterface {
 }
 
 func (b *BoschECU) Initialize(ctx context.Context, config ECUConfig) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	b.logger = config.Logger
-	b.bus = config.CANBus
-
-	// Create cancellable context
-	b.ctx, b.cancel = context.WithCancel(ctx)
+	// Initialize base ECU functionality
+	if err := b.InitializeBase(ctx, config); err != nil {
+		return err
+	}
 
 	b.logger.Printf("Initialized Bosch ECU")
 	return nil
@@ -69,6 +60,9 @@ func (b *BoschECU) Initialize(ctx context.Context, config ECUConfig) error {
 func (b *BoschECU) HandleFrame(frame can.Frame) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	// Update timestamp for stale data detection
+	b.UpdateFrameTimestamp()
 
 	switch frame.ID {
 	case BoschStatus1FrameID:
@@ -98,10 +92,9 @@ func (b *BoschECU) handleStatus1Frame(frame can.Frame) error {
 	// RPM
 	b.rpm = binary.BigEndian.Uint16(frame.Data[4:6])
 
-	// Speed with calibration
+	// Speed with calibration and averaging
 	b.rawSpeed = uint16(frame.Data[6]) // Store raw speed
-	calibratedSpeed := float64(b.rawSpeed) * CalibrationFactor * SpeedToleranceFactor
-	b.speed = uint16(calibratedSpeed)
+	b.speed = b.calculateSpeed(b.rawSpeed)
 
 	if frame.Length >= 8 {
 		b.throttleOn = (frame.Data[7] & 0x01) != 0
@@ -153,7 +146,7 @@ func (b *BoschECU) SetKersEnabled(enabled bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.logger.Printf("Setting Bosch ECU KERS. boost=%v, gear=%v, kers=%v",
+	b.logger.Info("Setting Bosch ECU KERS. boost=%v, gear=%v, kers=%v",
 		BoschBoostModeEnable, BoschGearModeEnable, enabled)
 
 	if enabled {
@@ -168,6 +161,9 @@ func (b *BoschECU) SetKersEnabled(enabled bool) error {
 			Data:   [8]byte{},
 		}
 		copy(ebsFrame.Data[:], data)
+
+		// Log outgoing CAN frame
+		DebugCANFrame(b.logger, "TX", ebsFrame.ID, ebsFrame.Data, ebsFrame.Length)
 
 		if err := b.bus.Publish(ebsFrame); err != nil {
 			return err
@@ -187,6 +183,9 @@ func (b *BoschECU) SetKersEnabled(enabled bool) error {
 		Data:   [8]byte{},
 	}
 	copy(controlFrame.Data[:], controlData)
+
+	// Log outgoing CAN frame
+	DebugCANFrame(b.logger, "TX", controlFrame.ID, controlFrame.Data, controlFrame.Length)
 
 	if err := b.bus.Publish(controlFrame); err != nil {
 		return err
@@ -274,7 +273,5 @@ func (b *BoschECU) GetRawSpeed() uint16 {
 }
 
 func (b *BoschECU) Cleanup() {
-	if b.cancel != nil {
-		b.cancel()
-	}
+	b.CleanupBase()
 }

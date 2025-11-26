@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"sync"
 
 	"ecu-service/ecu"
@@ -19,14 +18,14 @@ const (
 )
 
 type Diag struct {
-	log          *log.Logger
+	log          *LeveledLogger
 	redis        *redis.Client
 	mu           sync.RWMutex
 	faultStates  map[ecu.ECUFault]bool
 	ctx          context.Context
 }
 
-func NewDiag(logger *log.Logger, redis *redis.Client) *Diag {
+func NewDiag(logger *LeveledLogger, redis *redis.Client) *Diag {
 	return &Diag{
 		log:         logger,
 		redis:       redis,
@@ -54,15 +53,15 @@ func (d *Diag) SetFaultPresence(fault ecu.ECUFault, present bool) {
 
 	config, ok := ecu.GetFaultConfig(fault)
 	if !ok {
-		d.log.Printf("Unknown fault code: %d", fault)
+		d.log.Warn("Unknown fault code: %d", fault)
 		return
 	}
 
 	if present {
-		d.log.Printf("Fault set: code=%d, description=%s", fault, config.Description)
+		d.log.Warn("Fault set: code=%d, description=%s", fault, config.Description)
 		d.reportFaultPresent(fault, config)
 	} else {
-		d.log.Printf("Fault cleared: code=%d, description=%s", fault, config.Description)
+		d.log.Info("Fault cleared: code=%d, description=%s", fault, config.Description)
 		d.reportFaultAbsent(fault)
 	}
 }
@@ -87,10 +86,10 @@ func (d *Diag) SetFaults(faults map[ecu.ECUFault]bool) {
 		}
 
 		if newPresent {
-			d.log.Printf("Fault set: code=%d, description=%s", fault, config.Description)
+			d.log.Warn("Fault set: code=%d, description=%s", fault, config.Description)
 			d.reportFaultPresent(fault, config)
 		} else {
-			d.log.Printf("Fault cleared: code=%d, description=%s", fault, config.Description)
+			d.log.Info("Fault cleared: code=%d, description=%s", fault, config.Description)
 			d.reportFaultAbsent(fault)
 		}
 	}
@@ -114,7 +113,7 @@ func (d *Diag) reportFaultPresent(fault ecu.ECUFault, config ecu.FaultConfig) {
 	pipe.Publish(d.ctx, diagNotificationChannel, "fault")
 
 	if _, err := pipe.Exec(d.ctx); err != nil {
-		d.log.Printf("Failed to report fault present: %v", err)
+		d.log.Error("Failed to report fault present: %v", err)
 	}
 }
 
@@ -135,6 +134,6 @@ func (d *Diag) reportFaultAbsent(fault ecu.ECUFault) {
 	pipe.Publish(d.ctx, diagNotificationChannel, "fault")
 
 	if _, err := pipe.Exec(d.ctx); err != nil {
-		d.log.Printf("Failed to report fault absent: %v", err)
+		d.log.Error("Failed to report fault absent: %v", err)
 	}
 }

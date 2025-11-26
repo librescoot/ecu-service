@@ -2,8 +2,6 @@ package ecu
 
 import (
     "context"
-    "fmt"
-    "log"
     "sync"
     "time"
     "github.com/brutella/can"
@@ -15,19 +13,23 @@ const (
     CalibrationFactor    = 1.03
     RPMToSpeedFactor     = 0.0783744
     OdoCalFactor         = 1.07
-    
+
     // Window size for speed averaging
     WindowSize = 3
+
+    // Timeout for stale ECU data (if no frames received in this time, data is considered stale)
+    ECUDataTimeout = 2 * time.Second
 )
 
 // BaseECU contains common ECU functionality
 type BaseECU struct {
-    mu           sync.RWMutex
-    logger       *log.Logger
-    bus          *can.Bus
-    ctx          context.Context
-    cancel       context.CancelFunc
-    speedBuffer  SpeedBuffer
+    mu              sync.RWMutex
+    logger          Logger
+    bus             *can.Bus
+    ctx             context.Context
+    cancel          context.CancelFunc
+    speedBuffer     SpeedBuffer
+    lastFrameTime   time.Time  // Timestamp of last received CAN frame
 }
 
 // SpeedBuffer implements a moving average for speed readings
@@ -72,9 +74,7 @@ func (b *BaseECU) InitializeBase(ctx context.Context, config ECUConfig) error {
     b.logger = config.Logger
     b.bus = config.CANBus
     b.ctx, b.cancel = context.WithCancel(ctx)
-
-    // Start health check goroutine
-    go b.healthCheck()
+    b.lastFrameTime = time.Now()
 
     return nil
 }
@@ -86,36 +86,15 @@ func (b *BaseECU) CleanupBase() {
     }
 }
 
-// healthCheck periodically checks CAN bus health
-func (b *BaseECU) healthCheck() {
-    ticker := time.NewTicker(30 * time.Second)
-    defer ticker.Stop()
-
-    for {
-        select {
-        case <-b.ctx.Done():
-            return
-        case <-ticker.C:
-            if err := b.sendTestFrame(); err != nil {
-                b.logger.Printf("CAN health check failed: %v", err)
-            }
-        }
-    }
+// UpdateFrameTimestamp updates the timestamp of the last received frame
+// Should be called by ECU implementations when processing frames
+func (b *BaseECU) UpdateFrameTimestamp() {
+    b.lastFrameTime = time.Now()
 }
 
-// sendTestFrame sends a test frame to verify CAN bus operation
-func (b *BaseECU) sendTestFrame() error {
-    frame := can.Frame{
-        ID:     0x7FF, // Test frame ID
-        Length: 2,
-        Data:   [8]byte{0xAA, 0x55}, // Test pattern
-    }
-
-    if err := b.bus.Publish(frame); err != nil {
-        return fmt.Errorf("failed to send test frame: %v", err)
-    }
-    
-    return nil
+// IsDataStale returns true if no frames have been received within the timeout period
+func (b *BaseECU) IsDataStale() bool {
+    return time.Since(b.lastFrameTime) > ECUDataTimeout
 }
 
 // calculateSpeed processes raw speed input using calibration and averaging
