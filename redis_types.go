@@ -11,7 +11,9 @@ type RedisStatus1 struct {
 }
 
 type RedisStatus2 struct {
-	Temperature int
+	Temperature      int
+	FaultCode        uint32
+	FaultDescription string
 }
 
 type RedisStatus3 struct {
@@ -24,4 +26,5 @@ type RedisStatus4 struct {
 
 type RedisStatus5 struct {
 	FirmwareVersion uint32
+	Gear            uint8
 }

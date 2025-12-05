@@ -57,9 +57,19 @@ func (tx *IPCTx) SendStatus2(data RedisStatus2) error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 
-	if err := tx.redis.HSet(tx.ctx, "engine-ecu",
-		"temperature", data.Temperature,
-	).Err(); err != nil {
+	fields := map[string]interface{}{
+		"temperature": data.Temperature,
+		"fault:code":  data.FaultCode,
+	}
+
+	// Only include description if there's an active fault
+	if data.FaultCode != 0 && data.FaultDescription != "" {
+		fields["fault:description"] = data.FaultDescription
+	} else {
+		fields["fault:description"] = ""
+	}
+
+	if err := tx.redis.HSet(tx.ctx, "engine-ecu", fields).Err(); err != nil {
 		return fmt.Errorf("failed to send Status2: %v", err)
 	}
 
@@ -112,9 +122,16 @@ func (tx *IPCTx) SendStatus5(data RedisStatus5) error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 
-	if err := tx.redis.HSet(tx.ctx, "engine-ecu",
-		"fw-version", fmt.Sprintf("%08X", data.FirmwareVersion),
-	).Err(); err != nil {
+	fields := map[string]interface{}{
+		"gear": data.Gear,
+	}
+
+	// Only set firmware version if non-zero (avoids overwriting with 0 on startup)
+	if data.FirmwareVersion != 0 {
+		fields["fw-version"] = fmt.Sprintf("%08X", data.FirmwareVersion)
+	}
+
+	if err := tx.redis.HSet(tx.ctx, "engine-ecu", fields).Err(); err != nil {
 		return fmt.Errorf("failed to send Status5: %v", err)
 	}
 

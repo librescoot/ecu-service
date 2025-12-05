@@ -125,11 +125,8 @@ func (v *VotolECU) handleControllerStatusFrame(frame can.Frame) error {
 	// data0 contains controller temperature
 	v.temperature = int8(frame.Data[0])
 
-	// data6 contains error codes
-	errorByte := frame.Data[6]
-	if errorByte != 0 {
-		v.faultCode = uint32(errorByte)
-	}
+	// data6 contains error codes (always update to allow fault clearing)
+	v.faultCode = uint32(frame.Data[6])
 
 	return nil
 }
@@ -235,4 +232,21 @@ func (v *VotolECU) GetRawSpeed() uint16 {
 func (v *VotolECU) IsDataStale() bool {
 	// TODO: Implement stale data detection for Votol ECU
 	return false
+}
+
+// GetGear returns 0 for Votol ECU (gear selection not supported)
+func (v *VotolECU) GetGear() uint8 {
+	return 0
+}
+
+// GetFirmwareVersion returns 0 for Votol ECU (not available via CAN)
+func (v *VotolECU) GetFirmwareVersion() uint32 {
+	return 0
+}
+
+// RequestStatusUpdate is a no-op for Votol ECU as it sends status frames continuously
+// Unlike Bosch, there's no request mechanism - faults clear automatically when status frames arrive
+func (v *VotolECU) RequestStatusUpdate() error {
+	// Votol ECU sends status frames continuously, no request needed
+	return nil
 }

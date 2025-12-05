@@ -66,8 +66,18 @@ type ECUInterface interface {
 	// GetKersEnabled returns whether KERS is enabled
 	GetKersEnabled() bool
 
+	// GetGear returns the current gear (1-3, or 0 if unknown)
+	GetGear() uint8
+
+	// GetFirmwareVersion returns the ECU firmware version
+	GetFirmwareVersion() uint32
+
 	// IsDataStale returns true if no data has been received recently
 	IsDataStale() bool
+
+	// RequestStatusUpdate sends a CAN message to request the ECU to send all status frames
+	// This is used after fault detection to check if faults have cleared
+	RequestStatusUpdate() error
 
 	// Cleanup performs any necessary cleanup
 	Cleanup()

@@ -8,14 +8,19 @@ import (
 )
 
 const (
-	// Bosch ECU CAN IDs
-	BoschStatus1FrameID        = 0x7E0
-	BoschStatus2FrameID        = 0x7E1
-	BoschStatus3FrameID        = 0x7E2
-	BoschStatus4FrameID        = 0x7E3
-	BoschEBSSetFrameID         = 0x4E2
-	BoschControlMessageID      = 0x4E0
-	BoschStatusRequestFrameID  = 0x4EF // Request all ECU status messages
+	// Bosch ECU CAN IDs - Status messages (0x7xx)
+	BoschStatus1FrameID   = 0x7E0 // Voltage, current, RPM, speed, throttle
+	BoschStatus2FrameID   = 0x7E1 // Temperature, fault code
+	BoschStatus3FrameID   = 0x7E2 // Odometer
+	BoschStatus4FrameID   = 0x7E3 // KERS status
+	BoschGearFrameID      = 0x7E4 // Current gear
+	BoschEBSStatusFrameID = 0x7E5 // Regenerative braking status
+	BoschStatus5FrameID   = 0x7E8 // Firmware version
+
+	// Bosch ECU CAN IDs - Control messages (0x4xx)
+	BoschControlMessageID     = 0x4E0 // Gear/boost/KERS control
+	BoschEBSSetFrameID        = 0x4E2 // Set EBS voltage/current
+	BoschStatusRequestFrameID = 0x4EF // Request all ECU status messages
 
 	// Constants for KERS
 	KersVoltage          = 56000 // 56V
@@ -23,7 +28,7 @@ const (
 	BoschGearModeEnable  = true
 	BoschBoostModeEnable = false
 
-	// Odometer calibration factor (as applied by unu service)
+	// Odometer calibration factor
 	OdometerCalibrationFactor = 1.07
 )
 
@@ -31,16 +36,18 @@ type BoschECU struct {
 	BaseECU
 
 	// State
-	speed       uint16
-	rawSpeed    uint16 // Store raw speed before calibration
-	rpm         uint16
-	voltage     int
-	current     int
-	temperature int8
-	odometer    uint32
-	faultCode   uint32
-	kersEnabled bool
-	throttleOn  bool
+	speed           uint16
+	rawSpeed        uint16 // Store raw speed before calibration
+	rpm             uint16
+	voltage         int
+	current         int
+	temperature     int8
+	odometer        uint32
+	faultCode       uint32
+	gear            uint8  // Current gear (1-3)
+	firmwareVersion uint32 // ECU firmware version
+	kersEnabled     bool
+	throttleOn      bool
 }
 
 func NewBoschECU() ECUInterface {
@@ -73,6 +80,12 @@ func (b *BoschECU) HandleFrame(frame can.Frame) error {
 		return b.handleStatus3Frame(frame)
 	case BoschStatus4FrameID:
 		return b.handleStatus4Frame(frame)
+	case BoschGearFrameID:
+		return b.handleGearFrame(frame)
+	case BoschEBSStatusFrameID:
+		return b.handleEBSStatusFrame(frame)
+	case BoschStatus5FrameID:
+		return b.handleStatus5Frame(frame)
 	}
 
 	return nil
@@ -113,8 +126,13 @@ func (b *BoschECU) handleStatus2Frame(frame can.Frame) error {
 	// Temperature
 	b.temperature = int8(frame.Data[0])
 
-	// Fault code
-	b.faultCode = binary.BigEndian.Uint32(frame.Data[2:6])
+	// Fault code - filter out fault code 15 which is spurious
+	// when software brake is applied in parking mode
+	faultCode := binary.BigEndian.Uint32(frame.Data[2:6])
+	if faultCode == 15 {
+		faultCode = 0
+	}
+	b.faultCode = faultCode
 
 	return nil
 }
@@ -138,6 +156,44 @@ func (b *BoschECU) handleStatus4Frame(frame can.Frame) error {
 
 	// KERS status
 	b.kersEnabled = (frame.Data[0] & 0x40) != 0
+
+	return nil
+}
+
+func (b *BoschECU) handleGearFrame(frame can.Frame) error {
+	if frame.Length < 1 {
+		return nil
+	}
+
+	// Gear number (1-3)
+	b.gear = frame.Data[0]
+	b.logger.Debug("ECU gear: %d", b.gear)
+
+	return nil
+}
+
+func (b *BoschECU) handleEBSStatusFrame(frame can.Frame) error {
+	if frame.Length < 4 {
+		return nil
+	}
+
+	// EBS (regenerative braking) voltage and current (10mV and 10mA units)
+	ebsVoltage := binary.BigEndian.Uint16(frame.Data[0:2])
+	ebsCurrent := binary.BigEndian.Uint16(frame.Data[2:4])
+
+	b.logger.Debug("ECU EBS: voltage=%dmV, current=%dmA", ebsVoltage*10, ebsCurrent*10)
+
+	return nil
+}
+
+func (b *BoschECU) handleStatus5Frame(frame can.Frame) error {
+	if frame.Length < 4 {
+		return nil
+	}
+
+	// Firmware version from ECU
+	b.firmwareVersion = binary.BigEndian.Uint32(frame.Data[0:4])
+	b.logger.Info("ECU firmware version: 0x%08X", b.firmwareVersion)
 
 	return nil
 }
@@ -270,6 +326,41 @@ func (b *BoschECU) GetRawSpeed() uint16 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.rawSpeed
+}
+
+func (b *BoschECU) GetGear() uint8 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.gear
+}
+
+func (b *BoschECU) GetFirmwareVersion() uint32 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.firmwareVersion
+}
+
+// RequestStatusUpdate sends 0x4EF to request the ECU to transmit all status frames
+// This is used after fault detection to check if faults have cleared
+func (b *BoschECU) RequestStatusUpdate() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	frame := can.Frame{
+		ID:     BoschStatusRequestFrameID,
+		Length: 0,
+		Data:   [8]byte{},
+	}
+
+	DebugCANFrame(b.logger, "TX", frame.ID, frame.Data, frame.Length)
+
+	if err := b.bus.Publish(frame); err != nil {
+		b.logger.Error("Failed to send status request: %v", err)
+		return err
+	}
+
+	b.logger.Debug("Sent ECU status request (0x4EF)")
+	return nil
 }
 
 func (b *BoschECU) Cleanup() {

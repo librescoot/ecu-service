@@ -15,6 +15,12 @@ import (
 const (
 	EngineAppIPCRetryTime = 2 * time.Second
 	EngineAppIPCRetries   = 3
+
+	// Fault recovery timing constants
+	// After a fault is detected, wait before requesting ECU status update
+	FaultUpdateDelay = 500 * time.Millisecond
+	// If fault persists this long without clearing, force clear it
+	FaultClearTimeout = 5 * time.Second
 )
 
 type EngineApp struct {
@@ -23,13 +29,18 @@ type EngineApp struct {
 	ipcRx     *IPCRx
 	ipcTx     *IPCTx
 	battery   *Battery
-	ecu       ecu.ECUInterface // New ECU interface
+	ecu       ecu.ECUInterface
 	diag      *Diag
 	kers      *KERS
 	mu        sync.Mutex
 	ctx       context.Context
 	cancel    context.CancelFunc
 	lastSpeed uint16 // Track last sent speed
+
+	// Fault recovery timers
+	faultUpdateTimer *time.Timer // Timer to request ECU status after fault
+	faultClearTimer  *time.Timer // Timer to force-clear stuck faults
+	hasFault         bool        // Track if we currently have an active fault
 }
 
 // writeDefaultRedisState writes default values to Redis
@@ -226,8 +237,23 @@ func (app *EngineApp) updateRedisState() {
 	}
 
 	// Always update other statuses as they might have changed
+	faultCode := app.ecu.GetFaultCode()
+	faultDesc := ""
+	if faultCode != 0 {
+		// Get description for the fault code
+		activeFaults := app.ecu.GetActiveFaults()
+		for fault := range activeFaults {
+			if config, ok := ecu.GetFaultConfig(fault); ok {
+				faultDesc = config.Description
+				break
+			}
+		}
+	}
+
 	status2 := RedisStatus2{
-		Temperature: int(app.ecu.GetTemperature()),
+		Temperature:      int(app.ecu.GetTemperature()),
+		FaultCode:        faultCode,
+		FaultDescription: faultDesc,
 	}
 
 	status3 := RedisStatus3{
@@ -250,8 +276,20 @@ func (app *EngineApp) updateRedisState() {
 		app.log.Error("Failed to send Status4: %v", err)
 	}
 
+	status5 := RedisStatus5{
+		FirmwareVersion: app.ecu.GetFirmwareVersion(),
+		Gear:            app.ecu.GetGear(),
+	}
+
+	if err := app.ipcTx.SendStatus5(status5); err != nil {
+		app.log.Error("Failed to send Status5: %v", err)
+	}
+
 	activeFaults := app.ecu.GetActiveFaults()
 	app.diag.SetFaults(activeFaults)
+
+	// Handle fault state changes and recovery timers
+	app.handleFaultState(activeFaults)
 }
 
 func (app *EngineApp) redisHealthCheck() {
@@ -272,12 +310,86 @@ func (app *EngineApp) redisHealthCheck() {
 	}
 }
 
+// handleFaultState manages fault recovery timers based on current fault state
+// Must be called with app.mu held
+func (app *EngineApp) handleFaultState(activeFaults map[ecu.ECUFault]bool) {
+	hasFault := len(activeFaults) > 0
+
+	if hasFault && !app.hasFault {
+		// Fault just appeared - start recovery timers
+		app.log.Info("Fault detected, starting recovery timers")
+		app.startFaultRecoveryTimers()
+	} else if !hasFault && app.hasFault {
+		// Fault just cleared - stop recovery timers
+		app.log.Info("Fault cleared, stopping recovery timers")
+		app.stopFaultRecoveryTimers()
+	} else if hasFault {
+		// Fault still present - refresh the update timer (but not the clear timer)
+		app.refreshFaultUpdateTimer()
+	}
+
+	app.hasFault = hasFault
+}
+
+// startFaultRecoveryTimers initializes both fault recovery timers
+func (app *EngineApp) startFaultRecoveryTimers() {
+	// Stop any existing timers first
+	app.stopFaultRecoveryTimers()
+
+	// Start the update timer - requests ECU status after delay
+	app.faultUpdateTimer = time.AfterFunc(FaultUpdateDelay, func() {
+		app.log.Info("Fault update timer expired, requesting ECU status")
+		if err := app.ecu.RequestStatusUpdate(); err != nil {
+			app.log.Error("Failed to request ECU status: %v", err)
+		}
+	})
+
+	// Start the clear timer - force clears faults after timeout
+	app.faultClearTimer = time.AfterFunc(FaultClearTimeout, func() {
+		app.log.Warn("Fault clear timer expired, forcing fault clear")
+		app.mu.Lock()
+		defer app.mu.Unlock()
+		// Force clear all faults in diagnostics
+		app.diag.SetFaults(make(map[ecu.ECUFault]bool))
+		app.hasFault = false
+	})
+}
+
+// refreshFaultUpdateTimer resets the update timer while fault is still present
+// This ensures we request status update shortly after fault packets stop arriving
+func (app *EngineApp) refreshFaultUpdateTimer() {
+	if app.faultUpdateTimer != nil {
+		app.faultUpdateTimer.Stop()
+		app.faultUpdateTimer = time.AfterFunc(FaultUpdateDelay, func() {
+			app.log.Info("Fault update timer expired, requesting ECU status")
+			if err := app.ecu.RequestStatusUpdate(); err != nil {
+				app.log.Error("Failed to request ECU status: %v", err)
+			}
+		})
+	}
+}
+
+// stopFaultRecoveryTimers stops both fault recovery timers
+func (app *EngineApp) stopFaultRecoveryTimers() {
+	if app.faultUpdateTimer != nil {
+		app.faultUpdateTimer.Stop()
+		app.faultUpdateTimer = nil
+	}
+	if app.faultClearTimer != nil {
+		app.faultClearTimer.Stop()
+		app.faultClearTimer = nil
+	}
+}
+
 
 func (app *EngineApp) Destroy() {
 	app.mu.Lock()
 	defer app.mu.Unlock()
 
 	app.log.Info("Shutting down...")
+
+	// Stop fault recovery timers
+	app.stopFaultRecoveryTimers()
 
 	if app.cancel != nil {
 		app.cancel()
