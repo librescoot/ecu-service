@@ -56,8 +56,11 @@ func NewIPCRx(logger *LeveledLogger, redis *redis.Client, battery *Battery, kers
 
 func (rx *IPCRx) SetBoostCallback(callback BoostCallback) {
 	rx.mu.Lock()
-	defer rx.mu.Unlock()
 	rx.boostCallback = callback
+	rx.mu.Unlock()
+
+	// Read initial boost setting now that callback is set
+	rx.handleBoostSetting()
 }
 
 func (rx *IPCRx) setupSubscriptions() error {

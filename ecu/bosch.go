@@ -209,11 +209,8 @@ func (b *BoschECU) SetBoostEnabled(enabled bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if err := b.sendControlMessage(b.kersEnabled, enabled); err != nil {
-		return err
-	}
-
 	b.boostEnabled = enabled
+	b.logger.Info("Boost setting stored: %v (will apply on next KERS update)", enabled)
 	return nil
 }
 
