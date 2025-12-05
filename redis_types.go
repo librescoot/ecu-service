@@ -21,7 +21,8 @@ type RedisStatus3 struct {
 }
 
 type RedisStatus4 struct {
-	KersOn bool
+	KersOn  bool
+	BoostOn bool
 }
 
 type RedisStatus5 struct {

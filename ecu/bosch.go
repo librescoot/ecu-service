@@ -23,10 +23,9 @@ const (
 	BoschStatusRequestFrameID = 0x4EF // Request all ECU status messages
 
 	// Constants for KERS
-	KersVoltage          = 56000 // 56V
-	KersCurrent          = 10000 // 10A
-	BoschGearModeEnable  = true
-	BoschBoostModeEnable = false
+	KersVoltage         = 56000 // 56V
+	KersCurrent         = 10000 // 10A
+	BoschGearModeEnable = true
 
 	// Odometer calibration factor
 	OdometerCalibrationFactor = 1.07
@@ -47,6 +46,7 @@ type BoschECU struct {
 	gear            uint8  // Current gear (1-3)
 	firmwareVersion uint32 // ECU firmware version
 	kersEnabled     bool
+	boostEnabled    bool
 	throttleOn      bool
 }
 
@@ -202,10 +202,33 @@ func (b *BoschECU) SetKersEnabled(enabled bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.logger.Info("Setting Bosch ECU KERS. boost=%v, gear=%v, kers=%v",
-		BoschBoostModeEnable, BoschGearModeEnable, enabled)
+	return b.sendControlMessage(enabled, b.boostEnabled)
+}
 
-	if enabled {
+func (b *BoschECU) SetBoostEnabled(enabled bool) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if err := b.sendControlMessage(b.kersEnabled, enabled); err != nil {
+		return err
+	}
+
+	b.boostEnabled = enabled
+	return nil
+}
+
+func (b *BoschECU) GetBoostEnabled() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.boostEnabled
+}
+
+// sendControlMessage sends the control frame 0x4E0 with current gear/boost/KERS state
+func (b *BoschECU) sendControlMessage(kersEnabled, boostEnabled bool) error {
+	b.logger.Info("Setting Bosch ECU control: boost=%v, gear=%v, kers=%v",
+		boostEnabled, BoschGearModeEnable, kersEnabled)
+
+	if kersEnabled {
 		// Send voltage/current settings first
 		data := make([]byte, 4)
 		binary.BigEndian.PutUint16(data[0:2], uint16(KersVoltage))
@@ -226,11 +249,11 @@ func (b *BoschECU) SetKersEnabled(enabled bool) error {
 		}
 	}
 
-	// Send control message
+	// Send control message: [Gear(bit0) | Boost(bit1) | KERS(bit2)]
 	controlData := []byte{
 		boolToByte(BoschGearModeEnable) |
-			(boolToByte(BoschBoostModeEnable) << 1) |
-			(boolToByte(enabled) << 2),
+			(boolToByte(boostEnabled) << 1) |
+			(boolToByte(kersEnabled) << 2),
 	}
 
 	controlFrame := can.Frame{
@@ -247,7 +270,7 @@ func (b *BoschECU) SetKersEnabled(enabled bool) error {
 		return err
 	}
 
-	b.kersEnabled = enabled
+	b.kersEnabled = kersEnabled
 	return nil
 }
 

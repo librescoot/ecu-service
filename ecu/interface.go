@@ -33,6 +33,12 @@ type ECUInterface interface {
 	// SetKersEnabled enables/disables KERS functionality
 	SetKersEnabled(enabled bool) error
 
+	// SetBoostEnabled enables/disables boost mode
+	SetBoostEnabled(enabled bool) error
+
+	// GetBoostEnabled returns whether boost mode is enabled
+	GetBoostEnabled() bool
+
 	// GetSpeed returns the current speed in km/h
 	GetSpeed() uint16
 

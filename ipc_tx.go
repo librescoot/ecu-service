@@ -103,9 +103,10 @@ func (tx *IPCTx) SendStatus4(data RedisStatus4) error {
 
 	pipe := tx.redis.Pipeline()
 
-	pipe.HSet(tx.ctx, "engine-ecu",
-		"kers", map[bool]string{true: "on", false: "off"}[data.KersOn],
-	)
+	pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
+		"kers":  map[bool]string{true: "on", false: "off"}[data.KersOn],
+		"boost": map[bool]string{true: "on", false: "off"}[data.BoostOn],
+	})
 
 	// Also publish KERS state changes
 	pipe.Publish(tx.ctx, "engine-ecu kers", nil)

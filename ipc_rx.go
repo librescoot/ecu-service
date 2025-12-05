@@ -10,6 +10,9 @@ import (
 
 const IpcRxBatteryNameSize = 16
 
+// BoostCallback is called when the boost setting changes
+type BoostCallback func(enabled bool) error
+
 type IPCRx struct {
 	log     *LeveledLogger
 	redis   *redis.Client
@@ -21,6 +24,9 @@ type IPCRx struct {
 
 	batterySubscriptions [BatteryCount]*redis.PubSub
 	vehicleSubscription  *redis.PubSub
+	settingsSubscription *redis.PubSub
+
+	boostCallback BoostCallback
 }
 
 func NewIPCRx(logger *LeveledLogger, redis *redis.Client, battery *Battery, kers *KERS) *IPCRx {
@@ -48,12 +54,24 @@ func NewIPCRx(logger *LeveledLogger, redis *redis.Client, battery *Battery, kers
 	return rx
 }
 
+func (rx *IPCRx) SetBoostCallback(callback BoostCallback) {
+	rx.mu.Lock()
+	defer rx.mu.Unlock()
+	rx.boostCallback = callback
+}
+
 func (rx *IPCRx) setupSubscriptions() error {
 	// Subscribe to vehicle updates
 	rx.vehicleSubscription = rx.redis.Subscribe(rx.ctx, "vehicle")
 
 	// Start vehicle handler
 	go rx.handleVehicleSubscription()
+
+	// Subscribe to settings updates
+	rx.settingsSubscription = rx.redis.Subscribe(rx.ctx, "settings")
+
+	// Start settings handler
+	go rx.handleSettingsSubscription()
 
 	// Setup battery subscriptions
 	for i := 0; i < BatteryCount; i++ {
@@ -102,6 +120,62 @@ func (rx *IPCRx) handleVehicleSubscription() {
 
 		case *redis.Subscription:
 			rx.log.Debug("Vehicle subscription event: %s %s", m.Channel, m.Kind)
+		}
+	}
+}
+
+func (rx *IPCRx) handleSettingsSubscription() {
+	rx.log.Info("Starting settings subscription handler")
+
+	for {
+		msg, err := rx.settingsSubscription.Receive(rx.ctx)
+		if err != nil {
+			if err == context.Canceled {
+				return
+			}
+			// Check for closed client - panic to trigger systemd restart
+			if err.Error() == "redis: client is closed" {
+				rx.log.Error("Redis connection lost on settings subscription - restarting service")
+				panic("Redis disconnected")
+			}
+			rx.log.Error("Settings subscription error: %v", err)
+			continue
+		}
+
+		switch m := msg.(type) {
+		case *redis.Message:
+			rx.log.Debug("Settings message received: channel=%s, payload=%s", m.Channel, m.Payload)
+
+			// Payload contains the key that changed
+			if m.Payload == "engine-ecu.boost" {
+				rx.handleBoostSetting()
+			}
+
+		case *redis.Subscription:
+			rx.log.Debug("Settings subscription event: %s %s", m.Channel, m.Kind)
+		}
+	}
+}
+
+func (rx *IPCRx) handleBoostSetting() {
+	value, err := rx.redis.HGet(rx.ctx, "settings", "engine-ecu.boost").Result()
+	if err != nil {
+		if err != redis.Nil {
+			rx.log.Error("Failed to get boost setting: %v", err)
+		}
+		return
+	}
+
+	enabled := value == "true"
+	rx.log.Info("Boost setting changed: %s (enabled=%v)", value, enabled)
+
+	rx.mu.RLock()
+	callback := rx.boostCallback
+	rx.mu.RUnlock()
+
+	if callback != nil {
+		if err := callback(enabled); err != nil {
+			rx.log.Error("Failed to set boost: %v", err)
 		}
 	}
 }
@@ -177,6 +251,9 @@ func (rx *IPCRx) readInitialStates() {
 		rx.handleVehicleState(state)
 	}
 
+	// Read initial boost setting
+	rx.handleBoostSetting()
+
 	// Read battery states
 	for i := 0; i < BatteryCount; i++ {
 		batteryKey := fmt.Sprintf("battery:%d", i)
@@ -244,5 +321,9 @@ func (rx *IPCRx) Destroy() {
 
 	if rx.vehicleSubscription != nil {
 		rx.vehicleSubscription.Close()
+	}
+
+	if rx.settingsSubscription != nil {
+		rx.settingsSubscription.Close()
 	}
 }

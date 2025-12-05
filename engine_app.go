@@ -69,7 +69,8 @@ func (app *EngineApp) writeDefaultRedisState() {
 
 	// Default Status4 values
 	status4 := RedisStatus4{
-		KersOn: false, // KERS disabled
+		KersOn:  false, // KERS disabled
+		BoostOn: false, // Boost disabled
 	}
 
 	// Write all default values to Redis
@@ -188,6 +189,11 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 	}
 	app.log.Debug("IPC RX component initialized")
 
+	// Set boost callback to forward settings changes to ECU
+	app.ipcRx.SetBoostCallback(func(enabled bool) error {
+		return app.ecu.SetBoostEnabled(enabled)
+	})
+
 	return app, nil
 }
 
@@ -261,7 +267,8 @@ func (app *EngineApp) updateRedisState() {
 	}
 
 	status4 := RedisStatus4{
-		KersOn: app.ecu.GetKersEnabled(),
+		KersOn:  app.ecu.GetKersEnabled(),
+		BoostOn: app.ecu.GetBoostEnabled(),
 	}
 
 	if err := app.ipcTx.SendStatus2(status2); err != nil {

@@ -211,8 +211,17 @@ func (v *VotolECU) SetKersEnabled(enabled bool) error {
 	defer v.mu.Unlock()
 
 	v.kersEnabled = enabled
-	// TODO: Implement actual CAN message sending for KERS control
 	return nil
+}
+
+func (v *VotolECU) SetBoostEnabled(enabled bool) error {
+	// Votol ECU does not support boost mode
+	return nil
+}
+
+func (v *VotolECU) GetBoostEnabled() bool {
+	// Votol ECU does not support boost mode
+	return false
 }
 
 func (v *VotolECU) Cleanup() {
