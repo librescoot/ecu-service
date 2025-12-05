@@ -3,6 +3,7 @@ package ecu
 import (
 	"context"
 	"encoding/binary"
+	"time"
 
 	"github.com/brutella/can"
 )
@@ -29,6 +30,9 @@ const (
 
 	// Odometer calibration factor
 	OdometerCalibrationFactor = 1.07
+
+	// Max time delta for power calculation (skip if ECU was off)
+	MaxPowerDeltaSeconds = 2.0
 )
 
 type BoschECU struct {
@@ -115,7 +119,47 @@ func (b *BoschECU) handleStatus1Frame(frame can.Frame) error {
 		b.throttleOn = false
 	}
 
+	// Update power metrics
+	b.updatePower()
+
 	return nil
+}
+
+// updatePower calculates power and integrates energy
+// Must be called while holding the lock
+func (b *BoschECU) updatePower() {
+	now := time.Now()
+
+	// Initialize lastPowerUpdate on first call
+	if b.lastPowerUpdate.IsZero() {
+		b.lastPowerUpdate = now
+		return
+	}
+
+	// Calculate time delta in seconds
+	dtSeconds := now.Sub(b.lastPowerUpdate).Seconds()
+
+	// Skip update if time delta is too large (ECU was off)
+	if dtSeconds > MaxPowerDeltaSeconds {
+		b.lastPowerUpdate = now
+		return
+	}
+
+	b.lastPowerUpdate = now
+
+	// Calculate instantaneous power in mW (voltage in mV, current in mA)
+	// Power (mW) = Voltage (mV) × Current (mA) / 1000
+	powerMW := int64(b.voltage) * int64(b.current) / 1000
+
+	// Integrate power over time: Energy (mWh) = Power (mW) × time (hours)
+	deltaEnergy := float64(powerMW) * dtSeconds / 3600.0
+
+	// Separate consumed vs recovered energy
+	if deltaEnergy > 0 {
+		b.energyConsumed += uint64(deltaEnergy)
+	} else {
+		b.energyRecovered += uint64(-deltaEnergy)
+	}
 }
 
 func (b *BoschECU) handleStatus2Frame(frame can.Frame) error {

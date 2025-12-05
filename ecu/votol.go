@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"sync"
+	"time"
 
 	"github.com/brutella/can"
 )
@@ -39,6 +40,11 @@ type VotolECU struct {
 	faultCode   uint32
 	kersEnabled bool
 	throttleOn  bool // Votol ECU does not seem to report throttle, will default to false
+
+	// Power metrics
+	energyConsumed  uint64
+	energyRecovered uint64
+	lastPowerUpdate time.Time
 }
 
 func NewVotolECU() ECUInterface {
@@ -114,7 +120,45 @@ func (v *VotolECU) handleControllerDisplayFrame(frame can.Frame) error {
 	currentRaw := int16(binary.LittleEndian.Uint16(frame.Data[6:8]))
 	v.current = int(currentRaw) * 100 // Convert to mA
 
+	// Update power metrics
+	v.updatePower()
+
 	return nil
+}
+
+// updatePower calculates power and integrates energy
+// Must be called while holding the lock
+func (v *VotolECU) updatePower() {
+	now := time.Now()
+
+	// Initialize lastPowerUpdate on first call
+	if v.lastPowerUpdate.IsZero() {
+		v.lastPowerUpdate = now
+		return
+	}
+
+	// Calculate time delta in seconds
+	dtSeconds := now.Sub(v.lastPowerUpdate).Seconds()
+
+	// Skip update if time delta is too large (ECU was off)
+	if dtSeconds > MaxPowerDeltaSeconds {
+		v.lastPowerUpdate = now
+		return
+	}
+
+	v.lastPowerUpdate = now
+
+	// Calculate instantaneous power in mW
+	powerMW := int64(v.voltage) * int64(v.current) / 1000
+
+	// Integrate power over time: Energy (mWh) = Power (mW) × time (hours)
+	deltaEnergy := float64(powerMW) * dtSeconds / 3600.0
+
+	if deltaEnergy > 0 {
+		v.energyConsumed += uint64(deltaEnergy)
+	} else {
+		v.energyRecovered += uint64(-deltaEnergy)
+	}
 }
 
 func (v *VotolECU) handleControllerStatusFrame(frame can.Frame) error {
@@ -258,4 +302,22 @@ func (v *VotolECU) GetFirmwareVersion() uint32 {
 func (v *VotolECU) RequestStatusUpdate() error {
 	// Votol ECU sends status frames continuously, no request needed
 	return nil
+}
+
+func (v *VotolECU) GetInstantPower() int {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.voltage * v.current / 1000
+}
+
+func (v *VotolECU) GetEnergyConsumed() uint64 {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.energyConsumed
+}
+
+func (v *VotolECU) GetEnergyRecovered() uint64 {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.energyRecovered
 }

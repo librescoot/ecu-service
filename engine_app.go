@@ -50,11 +50,14 @@ func (app *EngineApp) writeDefaultRedisState() {
 
 	// Default Status1 values
 	status1 := RedisStatus1{
-		MotorVoltage: 0,     // 0V
-		MotorCurrent: 0,     // 0A
-		RPM:          0,     // 0 RPM
-		Speed:        0,     // 0 km/h
-		ThrottleOn:   false, // Throttle off
+		MotorVoltage:    0,     // 0V
+		MotorCurrent:    0,     // 0A
+		RPM:             0,     // 0 RPM
+		Speed:           0,     // 0 km/h
+		ThrottleOn:      false, // Throttle off
+		Power:           0,
+		EnergyConsumed:  0,
+		EnergyRecovered: 0,
 	}
 
 	// Default Status2 values
@@ -227,12 +230,15 @@ func (app *EngineApp) updateRedisState() {
 	// Only update if speed has changed
 	if currentSpeed != app.lastSpeed {
 		status1 := RedisStatus1{
-			MotorVoltage: app.ecu.GetVoltage(),
-			MotorCurrent: app.ecu.GetCurrent(),
-			RPM:          app.ecu.GetRPM(),
-			Speed:        currentSpeed,
-			RawSpeed:     rawSpeed,
-			ThrottleOn:   app.ecu.GetThrottleOn(),
+			MotorVoltage:    app.ecu.GetVoltage(),
+			MotorCurrent:    app.ecu.GetCurrent(),
+			RPM:             app.ecu.GetRPM(),
+			Speed:           currentSpeed,
+			RawSpeed:        rawSpeed,
+			ThrottleOn:      app.ecu.GetThrottleOn(),
+			Power:           app.ecu.GetInstantPower(),
+			EnergyConsumed:  app.ecu.GetEnergyConsumed(),
+			EnergyRecovered: app.ecu.GetEnergyRecovered(),
 		}
 
 		if err := app.ipcTx.SendStatus1(status1); err != nil {

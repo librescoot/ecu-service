@@ -30,6 +30,11 @@ type BaseECU struct {
     cancel          context.CancelFunc
     speedBuffer     SpeedBuffer
     lastFrameTime   time.Time  // Timestamp of last received CAN frame
+    energyConsumed  uint64     // Cumulative energy consumed in mWh
+    energyRecovered uint64     // Cumulative energy recovered in mWh
+    lastPowerUpdate time.Time  // Last time power was calculated
+    lastVoltage     int        // Last voltage reading for power calc
+    lastCurrent     int        // Last current reading for power calc
 }
 
 // SpeedBuffer implements a moving average for speed readings
@@ -131,4 +136,64 @@ func boolToByte(b bool) byte {
         return 1
     }
     return 0
+}
+
+// UpdatePower calculates instantaneous power and integrates over time
+// to update energy consumed and recovered counters
+func (b *BaseECU) UpdatePower(voltage int, current int) {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+
+    b.lastVoltage = voltage
+    b.lastCurrent = current
+
+    now := time.Now()
+
+    // Initialize lastPowerUpdate on first call
+    if b.lastPowerUpdate.IsZero() {
+        b.lastPowerUpdate = now
+        return
+    }
+
+    // Calculate time delta in hours
+    dt := now.Sub(b.lastPowerUpdate).Hours()
+    b.lastPowerUpdate = now
+
+    // Calculate instantaneous power in mW (voltage in mV, current in mA)
+    // Power (mW) = Voltage (mV) × Current (mA) / 1000
+    powerMW := int64(voltage) * int64(current) / 1000
+
+    // Integrate power over time to get energy in mWh
+    energyMWh := float64(powerMW) * dt
+
+    // Separate consumed vs recovered energy
+    if energyMWh > 0 {
+        // Positive power = consuming energy
+        b.energyConsumed += uint64(energyMWh)
+    } else {
+        // Negative power = recovering energy (regen braking)
+        b.energyRecovered += uint64(-energyMWh)
+    }
+}
+
+// GetInstantPower returns the current instantaneous power in mW
+func (b *BaseECU) GetInstantPower() int {
+    b.mu.RLock()
+    defer b.mu.RUnlock()
+    // Power (mW) = Voltage (mV) × Current (mA) / 1000
+    return b.lastVoltage * b.lastCurrent / 1000
+}
+
+// GetEnergyConsumed returns the cumulative energy consumed in mWh
+func (b *BaseECU) GetEnergyConsumed() uint64 {
+    b.mu.RLock()
+    defer b.mu.RUnlock()
+    return b.energyConsumed
+}
+
+// GetEnergyRecovered returns the cumulative energy recovered in mWh
+func (b *BaseECU) GetEnergyRecovered() uint64 {
+    b.mu.RLock()
+    defer b.mu.RUnlock()
+    return b.energyRecovered
 }
