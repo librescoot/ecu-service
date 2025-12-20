@@ -10,8 +10,10 @@ import (
 	"syscall"
 )
 
+var version = "dev"
+
 var (
-	version     = flag.Bool("version", false, "Print version info")
+	versionFlag = flag.Bool("version", false, "Print version info")
 	help        = flag.Bool("help", false, "Print help")
 	logLevel    = flag.Int("log", 3, "Log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG)")
 	redisServer = flag.String("redis_server", "127.0.0.1", "Redis server address")
@@ -37,7 +39,7 @@ func printHelp() {
 func main() {
 	flag.Parse()
 
-	if *version {
+	if *versionFlag {
 		printVersion()
 		os.Exit(0)
 	}
@@ -62,6 +64,8 @@ func main() {
 
 	// Create leveled logger wrapper
 	logger := NewLeveledLogger(baseLogger, LogLevel(*logLevel))
+
+	log.Printf("librescoot-ecu %s starting", version)
 
 	// Parse ECU type
 	var ecuTypeEnum ecu.ECUType

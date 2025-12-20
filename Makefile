@@ -1,19 +1,20 @@
-.PHONY: build clean build-arm build-amd64 lint test
+.PHONY: build clean build-arm build-amd64 build-host dist fmt deps lint test
 
 BINARY_NAME=ecu-service
 BUILD_DIR=bin
-LDFLAGS=-ldflags "-w -s -extldflags '-static'"
+VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+LDFLAGS=-ldflags "-w -s -X main.version=$(VERSION) -extldflags '-static'"
 
 build:
 	mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=6 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) .
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) .
 
 clean:
 	rm -rf $(BUILD_DIR)
 
 build-arm:
 	mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=6 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) .
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) .
 
 build-amd64:
 	mkdir -p $(BUILD_DIR)
@@ -24,3 +25,17 @@ lint:
 
 test:
 	go test -v ./...
+
+build-host:
+	mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-host .
+
+dist:
+	mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) .
+
+fmt:
+	go fmt ./...
+
+deps:
+	go mod download && go mod tidy
