@@ -1,4 +1,4 @@
-.PHONY: build clean build-arm build-amd64 build-host dist fmt deps lint test
+.PHONY: build clean build-arm build-host dist fmt deps lint test
 
 BINARY_NAME=ecu-service
 BUILD_DIR=bin
@@ -12,27 +12,19 @@ build:
 clean:
 	rm -rf $(BUILD_DIR)
 
-build-arm:
-	mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) .
+build-arm: build
 
-build-amd64:
+build-host:
 	mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-amd64 .
+	CGO_ENABLED=0 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-host .
+
+dist: build
 
 lint:
 	golangci-lint run
 
 test:
 	go test -v ./...
-
-build-host:
-	mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-host .
-
-dist:
-	mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) .
 
 fmt:
 	go fmt ./...
