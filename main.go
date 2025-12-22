@@ -22,13 +22,8 @@ var (
 	ecuType     = flag.String("ecu_type", "bosch", "ECU type (bosch or votol)")
 )
 
-const (
-	ProjectName    = "ecu-service"
-	ProjectVersion = "1.0.0"
-)
-
 func printVersion() {
-	fmt.Printf("%s v%s\n", ProjectName, ProjectVersion)
+	fmt.Printf("ecu-service %s\n", version)
 }
 
 func printHelp() {
