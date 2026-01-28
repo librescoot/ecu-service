@@ -30,9 +30,6 @@ const (
 
 	// Odometer calibration factor
 	OdometerCalibrationFactor = 1.07
-
-	// Max time delta for power calculation (skip if ECU was off)
-	MaxPowerDeltaSeconds = 2.0
 )
 
 type BoschECU struct {

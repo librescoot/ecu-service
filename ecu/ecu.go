@@ -19,6 +19,9 @@ const (
 
     // Timeout for stale ECU data (if no frames received in this time, data is considered stale)
     ECUDataTimeout = 2 * time.Second
+
+    // Max time delta for power calculation (skip if ECU was off)
+    MaxPowerDeltaSeconds = 2.0
 )
 
 // BaseECU contains common ECU functionality
