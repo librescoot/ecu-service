@@ -94,6 +94,7 @@ func (b *BoschECU) HandleFrame(frame can.Frame) error {
 
 func (b *BoschECU) handleStatus1Frame(frame can.Frame) error {
 	if frame.Length < 8 {
+		b.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 8", frame.ID, frame.Length)
 		return nil
 	}
 
@@ -161,6 +162,7 @@ func (b *BoschECU) updatePower() {
 
 func (b *BoschECU) handleStatus2Frame(frame can.Frame) error {
 	if frame.Length < 6 {
+		b.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 6", frame.ID, frame.Length)
 		return nil
 	}
 
@@ -180,6 +182,7 @@ func (b *BoschECU) handleStatus2Frame(frame can.Frame) error {
 
 func (b *BoschECU) handleStatus3Frame(frame can.Frame) error {
 	if frame.Length < 4 {
+		b.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 4", frame.ID, frame.Length)
 		return nil
 	}
 
@@ -192,6 +195,7 @@ func (b *BoschECU) handleStatus3Frame(frame can.Frame) error {
 
 func (b *BoschECU) handleStatus4Frame(frame can.Frame) error {
 	if frame.Length < 1 {
+		b.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 1", frame.ID, frame.Length)
 		return nil
 	}
 
@@ -203,6 +207,7 @@ func (b *BoschECU) handleStatus4Frame(frame can.Frame) error {
 
 func (b *BoschECU) handleGearFrame(frame can.Frame) error {
 	if frame.Length < 1 {
+		b.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 1", frame.ID, frame.Length)
 		return nil
 	}
 
@@ -215,6 +220,7 @@ func (b *BoschECU) handleGearFrame(frame can.Frame) error {
 
 func (b *BoschECU) handleEBSStatusFrame(frame can.Frame) error {
 	if frame.Length < 4 {
+		b.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 4", frame.ID, frame.Length)
 		return nil
 	}
 
@@ -229,6 +235,7 @@ func (b *BoschECU) handleEBSStatusFrame(frame can.Frame) error {
 
 func (b *BoschECU) handleStatus5Frame(frame can.Frame) error {
 	if frame.Length < 4 {
+		b.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 4", frame.ID, frame.Length)
 		return nil
 	}
 

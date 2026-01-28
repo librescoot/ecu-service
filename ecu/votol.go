@@ -83,6 +83,7 @@ func (v *VotolECU) HandleFrame(frame can.Frame) error {
 
 func (v *VotolECU) handleDisplayControllerFrame(frame can.Frame) error {
 	if frame.Length < 8 {
+		v.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 8", frame.ID, frame.Length)
 		return nil
 	}
 
@@ -102,6 +103,7 @@ func (v *VotolECU) handleDisplayControllerFrame(frame can.Frame) error {
 
 func (v *VotolECU) handleControllerDisplayFrame(frame can.Frame) error {
 	if frame.Length < 8 {
+		v.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 8", frame.ID, frame.Length)
 		return nil
 	}
 
@@ -163,6 +165,7 @@ func (v *VotolECU) updatePower() {
 
 func (v *VotolECU) handleControllerStatusFrame(frame can.Frame) error {
 	if frame.Length < 8 {
+		v.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 8", frame.ID, frame.Length)
 		return nil
 	}
 
