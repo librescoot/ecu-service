@@ -35,7 +35,7 @@ type EngineApp struct {
 	mu        sync.Mutex
 	ctx       context.Context
 	cancel    context.CancelFunc
-	lastSpeed uint16 // Track last sent speed
+	lastStatus1 RedisStatus1 // Track last sent Status1 for change detection
 
 	// Fault recovery timers
 	faultUpdateTimer *time.Timer // Timer to request ECU status after fault
@@ -223,28 +223,23 @@ func (app *EngineApp) updateRedisState() {
 	app.mu.Lock()
 	defer app.mu.Unlock()
 
-	// Get current state from ECU
-	currentSpeed := app.ecu.GetSpeed()
-	rawSpeed := app.ecu.GetRawSpeed()
+	status1 := RedisStatus1{
+		MotorVoltage:    app.ecu.GetVoltage(),
+		MotorCurrent:    app.ecu.GetCurrent(),
+		RPM:             app.ecu.GetRPM(),
+		Speed:           app.ecu.GetSpeed(),
+		RawSpeed:        app.ecu.GetRawSpeed(),
+		ThrottleOn:      app.ecu.GetThrottleOn(),
+		Power:           app.ecu.GetInstantPower(),
+		EnergyConsumed:  app.ecu.GetEnergyConsumed(),
+		EnergyRecovered: app.ecu.GetEnergyRecovered(),
+	}
 
-	// Only update if speed has changed
-	if currentSpeed != app.lastSpeed {
-		status1 := RedisStatus1{
-			MotorVoltage:    app.ecu.GetVoltage(),
-			MotorCurrent:    app.ecu.GetCurrent(),
-			RPM:             app.ecu.GetRPM(),
-			Speed:           currentSpeed,
-			RawSpeed:        rawSpeed,
-			ThrottleOn:      app.ecu.GetThrottleOn(),
-			Power:           app.ecu.GetInstantPower(),
-			EnergyConsumed:  app.ecu.GetEnergyConsumed(),
-			EnergyRecovered: app.ecu.GetEnergyRecovered(),
-		}
-
+	if status1 != app.lastStatus1 {
 		if err := app.ipcTx.SendStatus1(status1); err != nil {
 			app.log.Error("Failed to send Status1: %v", err)
 		} else {
-			app.lastSpeed = currentSpeed
+			app.lastStatus1 = status1
 		}
 	}
 
