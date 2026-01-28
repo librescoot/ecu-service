@@ -49,9 +49,9 @@ func main() {
 		log.Fatalf("invalid log level %d", *logLevel)
 	}
 
-	// Create base logger - remove timestamp/prefix when running under systemd
+	// Create base logger - remove timestamp/prefix when running under systemd/journald
 	var baseLogger *log.Logger
-	if os.Getenv("INVOCATION_ID") != "" {
+	if os.Getenv("JOURNAL_STREAM") != "" {
 		baseLogger = log.New(os.Stdout, "", 0)
 	} else {
 		baseLogger = log.New(os.Stdout, "", log.LstdFlags)
