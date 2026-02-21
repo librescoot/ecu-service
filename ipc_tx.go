@@ -38,6 +38,7 @@ func (tx *IPCTx) SendStatus1(data RedisStatus1) error {
 		"speed":            data.Speed,
 		"raw-speed":        data.RawSpeed,
 		"throttle":         map[bool]string{true: "on", false: "off"}[data.ThrottleOn],
+		"brake":            map[bool]string{true: "on", false: "off"}[data.BrakeOn],
 		"power":            data.Power,
 		"energy:consumed":  data.EnergyConsumed,
 		"energy:recovered": data.EnergyRecovered,

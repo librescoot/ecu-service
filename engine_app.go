@@ -230,6 +230,7 @@ func (app *EngineApp) updateRedisState() {
 		Speed:           app.ecu.GetSpeed(),
 		RawSpeed:        app.ecu.GetRawSpeed(),
 		ThrottleOn:      app.ecu.GetThrottleOn(),
+		BrakeOn:         app.ecu.GetBrakeOn(),
 		Power:           app.ecu.GetInstantPower(),
 		EnergyConsumed:  app.ecu.GetEnergyConsumed(),
 		EnergyRecovered: app.ecu.GetEnergyRecovered(),

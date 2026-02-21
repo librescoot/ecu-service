@@ -46,9 +46,11 @@ type BoschECU struct {
 	faultCode       uint32
 	gear            uint8  // Current gear (1-3)
 	firmwareVersion uint32 // ECU firmware version
+	warrantyDate    uint32 // ECU warranty date
 	kersEnabled     bool
 	boostEnabled    bool
 	throttleOn      bool
+	brakeOn         bool
 }
 
 func NewBoschECU() ECUInterface {
@@ -113,8 +115,10 @@ func (b *BoschECU) handleStatus1Frame(frame can.Frame) error {
 
 	if frame.Length >= 8 {
 		b.throttleOn = (frame.Data[7] & 0x01) != 0
+		b.brakeOn = (frame.Data[7] & 0x02) != 0
 	} else {
 		b.throttleOn = false
+		b.brakeOn = false
 	}
 
 	// Update power metrics
@@ -234,14 +238,17 @@ func (b *BoschECU) handleEBSStatusFrame(frame can.Frame) error {
 }
 
 func (b *BoschECU) handleStatus5Frame(frame can.Frame) error {
-	if frame.Length < 4 {
-		b.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 4", frame.ID, frame.Length)
+	if frame.Length < 8 {
+		b.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 8", frame.ID, frame.Length)
 		return nil
 	}
 
-	// Firmware version from ECU
-	b.firmwareVersion = binary.BigEndian.Uint32(frame.Data[0:4])
-	b.logger.Info("ECU firmware version: 0x%08X", b.firmwareVersion)
+	// Status5 layout (8 bytes, big-endian):
+	//   [0:4] warranty_date
+	//   [4:8] software_version
+	b.warrantyDate = binary.BigEndian.Uint32(frame.Data[0:4])
+	b.firmwareVersion = binary.BigEndian.Uint32(frame.Data[4:8])
+	b.logger.Info("ECU firmware version: 0x%08X (warranty: 0x%08X)", b.firmwareVersion, b.warrantyDate)
 
 	return nil
 }
@@ -406,6 +413,18 @@ func (b *BoschECU) GetFirmwareVersion() uint32 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.firmwareVersion
+}
+
+func (b *BoschECU) GetWarrantyDate() uint32 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.warrantyDate
+}
+
+func (b *BoschECU) GetBrakeOn() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.brakeOn
 }
 
 // RequestStatusUpdate sends 0x4EF to request the ECU to transmit all status frames

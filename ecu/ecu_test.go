@@ -216,6 +216,40 @@ func TestBoschStatus1_Parse(t *testing.T) {
 	}
 }
 
+func TestBoschStatus1_BrakeOn(t *testing.T) {
+	b := newTestBoschECU()
+	data := make([]byte, 8)
+	// Byte 7: bit 0 = throttle, bit 1 = brake
+	data[7] = 0x02 // brake on, throttle off
+
+	err := b.HandleFrame(makeCANFrame(BoschStatus1FrameID, data))
+	if err != nil {
+		t.Fatalf("HandleFrame error: %v", err)
+	}
+
+	if !b.GetBrakeOn() {
+		t.Error("brake: expected on")
+	}
+	if b.GetThrottleOn() {
+		t.Error("throttle: expected off")
+	}
+}
+
+func TestBoschStatus1_ThrottleAndBrake(t *testing.T) {
+	b := newTestBoschECU()
+	data := make([]byte, 8)
+	data[7] = 0x03 // both throttle and brake
+
+	b.HandleFrame(makeCANFrame(BoschStatus1FrameID, data))
+
+	if !b.GetThrottleOn() {
+		t.Error("throttle: expected on")
+	}
+	if !b.GetBrakeOn() {
+		t.Error("brake: expected on")
+	}
+}
+
 func TestBoschStatus1_NegativeCurrent(t *testing.T) {
 	b := newTestBoschECU()
 	data := make([]byte, 8)
@@ -332,10 +366,12 @@ func TestBoschGear(t *testing.T) {
 	}
 }
 
-func TestBoschFirmwareVersion(t *testing.T) {
+func TestBoschStatus5_FirmwareAndWarranty(t *testing.T) {
 	b := newTestBoschECU()
-	data := make([]byte, 4)
-	binary.BigEndian.PutUint32(data[0:4], 0xDEADBEEF)
+	data := make([]byte, 8)
+	// Bytes [0:4] = warranty_date, [4:8] = software_version
+	binary.BigEndian.PutUint32(data[0:4], 0x20240115) // warranty date
+	binary.BigEndian.PutUint32(data[4:8], 0xDEADBEEF) // firmware version
 
 	err := b.HandleFrame(makeCANFrame(BoschStatus5FrameID, data))
 	if err != nil {
@@ -344,6 +380,20 @@ func TestBoschFirmwareVersion(t *testing.T) {
 
 	if b.GetFirmwareVersion() != 0xDEADBEEF {
 		t.Errorf("firmware: expected 0xDEADBEEF, got 0x%X", b.GetFirmwareVersion())
+	}
+	if b.GetWarrantyDate() != 0x20240115 {
+		t.Errorf("warranty: expected 0x20240115, got 0x%X", b.GetWarrantyDate())
+	}
+}
+
+func TestBoschStatus5_ShortFrame(t *testing.T) {
+	b := newTestBoschECU()
+	data := make([]byte, 4) // too short — should be ignored
+
+	b.HandleFrame(makeCANFrame(BoschStatus5FrameID, data))
+
+	if b.GetFirmwareVersion() != 0 {
+		t.Errorf("firmware should be 0 after short frame, got 0x%X", b.GetFirmwareVersion())
 	}
 }
 

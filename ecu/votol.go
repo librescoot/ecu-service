@@ -300,6 +300,16 @@ func (v *VotolECU) GetFirmwareVersion() uint32 {
 	return 0
 }
 
+// GetWarrantyDate returns 0 for Votol ECU (not available via CAN)
+func (v *VotolECU) GetWarrantyDate() uint32 {
+	return 0
+}
+
+// GetBrakeOn returns false for Votol ECU (not available via CAN)
+func (v *VotolECU) GetBrakeOn() bool {
+	return false
+}
+
 // RequestStatusUpdate is a no-op for Votol ECU as it sends status frames continuously
 // Unlike Bosch, there's no request mechanism - faults clear automatically when status frames arrive
 func (v *VotolECU) RequestStatusUpdate() error {

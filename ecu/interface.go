@@ -87,6 +87,12 @@ type ECUInterface interface {
 	// GetFirmwareVersion returns the ECU firmware version
 	GetFirmwareVersion() uint32
 
+	// GetWarrantyDate returns the ECU warranty date
+	GetWarrantyDate() uint32
+
+	// GetBrakeOn returns true if the brake is currently active
+	GetBrakeOn() bool
+
 	// IsDataStale returns true if no data has been received recently
 	IsDataStale() bool
 
