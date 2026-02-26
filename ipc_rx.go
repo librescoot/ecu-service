@@ -26,6 +26,8 @@ type IPCRx struct {
 	vehicleSubscription  *redis.PubSub
 	settingsSubscription *redis.PubSub
 
+	lastVehicleState string // Track previous state to avoid redundant processing
+
 	boostCallback BoostCallback
 }
 
@@ -110,7 +112,11 @@ func (rx *IPCRx) handleVehicleSubscription() {
 		case *redis.Message:
 			rx.log.Debug("Vehicle message received: channel=%s, payload=%s", m.Channel, m.Payload)
 
-			// Check if state was updated
+			// Only process state change notifications; ignore seatbox, brake, blinker, etc.
+			if m.Payload != "state" {
+				continue
+			}
+
 			state, err := rx.redis.HGet(rx.ctx, "vehicle", "state").Result()
 			if err != nil && err != redis.Nil {
 				rx.log.Error("Failed to get vehicle state: %v", err)
@@ -296,6 +302,14 @@ func (rx *IPCRx) readInitialStates() {
 }
 
 func (rx *IPCRx) handleVehicleState(state string) {
+	rx.mu.Lock()
+	if state == rx.lastVehicleState {
+		rx.mu.Unlock()
+		return
+	}
+	rx.lastVehicleState = state
+	rx.mu.Unlock()
+
 	var vehicleState VehicleState
 	if state == "ready-to-drive" {
 		vehicleState = VehicleStateEngineReady
