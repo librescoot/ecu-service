@@ -50,7 +50,7 @@ func (tx *IPCTx) SendStatus1(data RedisStatus1) error {
 	}
 
 	// Publish throttle state changes
-	if err := tx.redis.Publish(tx.ctx, "engine-ecu throttle", nil).Err(); err != nil {
+	if err := tx.redis.Publish(tx.ctx, "engine-ecu", "throttle").Err(); err != nil {
 		return fmt.Errorf("failed to publish throttle state: %v", err)
 	}
 
@@ -91,7 +91,7 @@ func (tx *IPCTx) SendStatus3(data RedisStatus3) error {
 	)
 
 	// Also publish odometer updates
-	pipe.Publish(tx.ctx, "engine-ecu odometer", nil)
+	pipe.Publish(tx.ctx, "engine-ecu", "odometer")
 
 	_, err := pipe.Exec(tx.ctx)
 	if err != nil {
@@ -113,7 +113,7 @@ func (tx *IPCTx) SendStatus4(data RedisStatus4) error {
 	})
 
 	// Also publish KERS state changes
-	pipe.Publish(tx.ctx, "engine-ecu kers", nil)
+	pipe.Publish(tx.ctx, "engine-ecu", "kers")
 
 	_, err := pipe.Exec(tx.ctx)
 	if err != nil {
@@ -162,7 +162,7 @@ func (tx *IPCTx) SendKersReasonOff(reason KersReasonOff) error {
 	)
 
 	// Also publish KERS reason off changes
-	pipe.Publish(tx.ctx, "engine-ecu kers-reason-off", nil)
+	pipe.Publish(tx.ctx, "engine-ecu", "kers-reason-off")
 
 	_, err := pipe.Exec(tx.ctx)
 	if err != nil {
