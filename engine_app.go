@@ -35,7 +35,11 @@ type EngineApp struct {
 	mu        sync.Mutex
 	ctx       context.Context
 	cancel    context.CancelFunc
-	lastStatus1 RedisStatus1 // Track last sent Status1 for change detection
+	lastStatus1 RedisStatus1 // Track last sent status for change detection
+	lastStatus2 RedisStatus2
+	lastStatus3 RedisStatus3
+	lastStatus4 RedisStatus4
+	lastStatus5 RedisStatus5
 
 	// Fault recovery timers
 	faultUpdateTimer *time.Timer // Timer to request ECU status after fault
@@ -244,7 +248,7 @@ func (app *EngineApp) updateRedisState() {
 		}
 	}
 
-	// Always update other statuses as they might have changed
+	// Update other statuses only if changed
 	faultCode := app.ecu.GetFaultCode()
 	faultDesc := ""
 	if faultCode != 0 {
@@ -273,16 +277,28 @@ func (app *EngineApp) updateRedisState() {
 		BoostOn: app.ecu.GetBoostEnabled(),
 	}
 
-	if err := app.ipcTx.SendStatus2(status2); err != nil {
-		app.log.Error("Failed to send Status2: %v", err)
+	if status2 != app.lastStatus2 {
+		if err := app.ipcTx.SendStatus2(status2); err != nil {
+			app.log.Error("Failed to send Status2: %v", err)
+		} else {
+			app.lastStatus2 = status2
+		}
 	}
 
-	if err := app.ipcTx.SendStatus3(status3); err != nil {
-		app.log.Error("Failed to send Status3: %v", err)
+	if status3 != app.lastStatus3 {
+		if err := app.ipcTx.SendStatus3(status3); err != nil {
+			app.log.Error("Failed to send Status3: %v", err)
+		} else {
+			app.lastStatus3 = status3
+		}
 	}
 
-	if err := app.ipcTx.SendStatus4(status4); err != nil {
-		app.log.Error("Failed to send Status4: %v", err)
+	if status4 != app.lastStatus4 {
+		if err := app.ipcTx.SendStatus4(status4); err != nil {
+			app.log.Error("Failed to send Status4: %v", err)
+		} else {
+			app.lastStatus4 = status4
+		}
 	}
 
 	status5 := RedisStatus5{
@@ -290,8 +306,12 @@ func (app *EngineApp) updateRedisState() {
 		Gear:            app.ecu.GetGear(),
 	}
 
-	if err := app.ipcTx.SendStatus5(status5); err != nil {
-		app.log.Error("Failed to send Status5: %v", err)
+	if status5 != app.lastStatus5 {
+		if err := app.ipcTx.SendStatus5(status5); err != nil {
+			app.log.Error("Failed to send Status5: %v", err)
+		} else {
+			app.lastStatus5 = status5
+		}
 	}
 
 	activeFaults := app.ecu.GetActiveFaults()
