@@ -24,9 +24,9 @@ const (
 	BoschStatusRequestFrameID = 0x4EF // Request all ECU status messages
 
 	// Constants for KERS
-	KersVoltage         = 56000 // 56V
-	KersCurrent         = 10000 // 10A
-	BoschGearModeEnable = true
+	KersVoltage            = 56000 // 56V
+	DefaultKersCurrent     = 10000 // 10A
+	BoschGearModeEnable    = true
 
 	// Odometer calibration factor
 	OdometerCalibrationFactor = 1.07
@@ -48,13 +48,16 @@ type BoschECU struct {
 	firmwareVersion uint32 // ECU firmware version
 	warrantyDate    uint32 // ECU warranty date
 	kersEnabled     bool
+	kersCurrent     uint16 // KERS current in mA
 	boostEnabled    bool
 	throttleOn      bool
 	brakeOn         bool
 }
 
 func NewBoschECU() ECUInterface {
-	return &BoschECU{}
+	return &BoschECU{
+		kersCurrent: DefaultKersCurrent,
+	}
 }
 
 func (b *BoschECU) Initialize(ctx context.Context, config ECUConfig) error {
@@ -260,6 +263,15 @@ func (b *BoschECU) SetKersEnabled(enabled bool) error {
 	return b.sendControlMessage(enabled, b.boostEnabled)
 }
 
+func (b *BoschECU) SetKersCurrent(current uint16) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.kersCurrent = current
+	b.logger.Info("KERS current set to: %d mA", current)
+	return nil
+}
+
 func (b *BoschECU) SetBoostEnabled(enabled bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -284,7 +296,7 @@ func (b *BoschECU) sendControlMessage(kersEnabled, boostEnabled bool) error {
 		// Send voltage/current settings first
 		data := make([]byte, 4)
 		binary.BigEndian.PutUint16(data[0:2], uint16(KersVoltage))
-		binary.BigEndian.PutUint16(data[2:4], uint16(KersCurrent))
+		binary.BigEndian.PutUint16(data[2:4], b.kersCurrent)
 
 		ebsFrame := can.Frame{
 			ID:     BoschEBSSetFrameID,

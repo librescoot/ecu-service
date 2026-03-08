@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 
 	"github.com/go-redis/redis/v8"
@@ -12,6 +13,12 @@ const IpcRxBatteryNameSize = 16
 
 // BoostCallback is called when the boost setting changes
 type BoostCallback func(enabled bool) error
+
+// KersEnabledCallback is called when the KERS enabled/disabled setting changes
+type KersEnabledCallback func(enabled bool)
+
+// KersPowerCallback is called when the KERS power (current) setting changes
+type KersPowerCallback func(current uint16) error
 
 type IPCRx struct {
 	log     *LeveledLogger
@@ -28,7 +35,9 @@ type IPCRx struct {
 
 	lastVehicleState string // Track previous state to avoid redundant processing
 
-	boostCallback BoostCallback
+	boostCallback       BoostCallback
+	kersEnabledCallback KersEnabledCallback
+	kersPowerCallback   KersPowerCallback
 }
 
 func NewIPCRx(logger *LeveledLogger, redis *redis.Client, battery *Battery, kers *KERS) *IPCRx {
@@ -63,6 +72,22 @@ func (rx *IPCRx) SetBoostCallback(callback BoostCallback) {
 
 	// Read initial boost setting now that callback is set
 	rx.handleBoostSetting()
+}
+
+func (rx *IPCRx) SetKersEnabledCallback(callback KersEnabledCallback) {
+	rx.mu.Lock()
+	rx.kersEnabledCallback = callback
+	rx.mu.Unlock()
+
+	rx.handleKersEnabledSetting()
+}
+
+func (rx *IPCRx) SetKersPowerCallback(callback KersPowerCallback) {
+	rx.mu.Lock()
+	rx.kersPowerCallback = callback
+	rx.mu.Unlock()
+
+	rx.handleKersPowerSetting()
 }
 
 func (rx *IPCRx) setupSubscriptions() error {
@@ -156,8 +181,13 @@ func (rx *IPCRx) handleSettingsSubscription() {
 			rx.log.Debug("Settings message received: channel=%s, payload=%s", m.Channel, m.Payload)
 
 			// Payload contains the key that changed
-			if m.Payload == "engine-ecu.boost" {
+			switch m.Payload {
+			case "engine-ecu.boost":
 				rx.handleBoostSetting()
+			case "engine-ecu.kers":
+				rx.handleKersEnabledSetting()
+			case "engine-ecu.kers-power":
+				rx.handleKersPowerSetting()
 			}
 
 		case *redis.Subscription:
@@ -185,6 +215,56 @@ func (rx *IPCRx) handleBoostSetting() {
 	if callback != nil {
 		if err := callback(enabled); err != nil {
 			rx.log.Error("Failed to set boost: %v", err)
+		}
+	}
+}
+
+func (rx *IPCRx) handleKersEnabledSetting() {
+	value, err := rx.redis.HGet(rx.ctx, "settings", "engine-ecu.kers").Result()
+	if err != nil {
+		if err != redis.Nil {
+			rx.log.Error("Failed to get KERS enabled setting: %v", err)
+		}
+		// Default: KERS enabled
+		return
+	}
+
+	enabled := value != "disabled"
+	rx.log.Info("KERS enabled setting changed: %s (enabled=%v)", value, enabled)
+
+	rx.mu.RLock()
+	callback := rx.kersEnabledCallback
+	rx.mu.RUnlock()
+
+	if callback != nil {
+		callback(enabled)
+	}
+}
+
+func (rx *IPCRx) handleKersPowerSetting() {
+	value, err := rx.redis.HGet(rx.ctx, "settings", "engine-ecu.kers-power").Result()
+	if err != nil {
+		if err != redis.Nil {
+			rx.log.Error("Failed to get KERS power setting: %v", err)
+		}
+		return
+	}
+
+	current, err := strconv.ParseUint(value, 10, 16)
+	if err != nil {
+		rx.log.Error("Invalid KERS power value '%s': %v", value, err)
+		return
+	}
+
+	rx.log.Info("KERS power setting changed: %d mA", current)
+
+	rx.mu.RLock()
+	callback := rx.kersPowerCallback
+	rx.mu.RUnlock()
+
+	if callback != nil {
+		if err := callback(uint16(current)); err != nil {
+			rx.log.Error("Failed to set KERS power: %v", err)
 		}
 	}
 }

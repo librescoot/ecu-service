@@ -33,6 +33,9 @@ type ECUInterface interface {
 	// SetKersEnabled enables/disables KERS functionality
 	SetKersEnabled(enabled bool) error
 
+	// SetKersCurrent sets the KERS regenerative braking current in mA
+	SetKersCurrent(current uint16) error
+
 	// SetBoostEnabled enables/disables boost mode
 	SetBoostEnabled(enabled bool) error
 

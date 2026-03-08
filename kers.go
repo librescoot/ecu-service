@@ -31,6 +31,7 @@ type KERS struct {
 	kersReasonOff    KersReasonOff
 	vehicleStopped   bool
 	vehicleState     VehicleState
+	settingsDisabled bool // true when user has disabled KERS via settings
 	engineOnTimer    *time.Timer
 	mu               sync.RWMutex
 	ctx              context.Context
@@ -84,10 +85,9 @@ func (k *KERS) SetKersEnabledCallback(callback func(bool) error) {
 	k.kersCallback = callback
 }
 
+// enableDisableKers sends the KERS enable/disable command to the ECU.
+// Must be called with k.mu held.
 func (k *KERS) enableDisableKers(enable bool) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-
 	if k.kersCallback != nil {
 		k.log.Info("Setting ECU EBS to: %v", enable)
 		if err := k.kersCallback(enable); err != nil {
@@ -97,6 +97,13 @@ func (k *KERS) enableDisableKers(enable bool) {
 }
 
 func (k *KERS) updateKers() {
+	// If KERS is disabled via settings, force it off unconditionally
+	if k.settingsDisabled {
+		k.log.Debug("updateKers: KERS disabled by settings -> forcing off")
+		k.enableDisableKers(false)
+		return
+	}
+
 	switch k.temperatureState {
 	case BatteryTemperatureStateCold:
 		k.kersReasonOff = KersReasonOffCold
@@ -131,6 +138,20 @@ func (k *KERS) updateKers() {
 	} else {
 		k.log.Debug("Vehicle not stopped. Not updating KERS (yet)")
 	}
+}
+
+func (k *KERS) SetSettingsEnabled(enabled bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	disabled := !enabled
+	if k.settingsDisabled == disabled {
+		return
+	}
+
+	k.settingsDisabled = disabled
+	k.log.Info("KERS settings: %s", map[bool]string{true: "enabled", false: "disabled"}[enabled])
+	k.updateKers()
 }
 
 func (k *KERS) UpdateBattery(state BatteryTemperatureState) {

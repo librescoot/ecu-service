@@ -201,6 +201,16 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 		return app.ecu.SetBoostEnabled(enabled)
 	})
 
+	// Set KERS enabled callback to forward settings changes to KERS module
+	app.ipcRx.SetKersEnabledCallback(func(enabled bool) {
+		app.kers.SetSettingsEnabled(enabled)
+	})
+
+	// Set KERS power callback to forward settings changes to ECU
+	app.ipcRx.SetKersPowerCallback(func(current uint16) error {
+		return app.ecu.SetKersCurrent(current)
+	})
+
 	return app, nil
 }
 
