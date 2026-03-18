@@ -258,6 +258,9 @@ func (app *EngineApp) updateRedisState() {
 		}
 	}
 
+	// Update KERS vehicle-stopped state based on speed
+	app.kers.UpdateVehicleStopped(status1.Speed == 0)
+
 	// Update other statuses only if changed
 	faultCode := app.ecu.GetFaultCode()
 	faultDesc := ""
