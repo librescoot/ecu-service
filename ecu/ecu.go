@@ -87,6 +87,14 @@ func (b *BaseECU) InitializeBase(ctx context.Context, config ECUConfig) error {
     return nil
 }
 
+// UpdateBus replaces the CAN bus reference after reconnection
+func (b *BaseECU) UpdateBus(bus *can.Bus) {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    b.bus = bus
+    b.lastFrameTime = time.Now()
+}
+
 // CleanupBase performs cleanup of base ECU resources
 func (b *BaseECU) CleanupBase() {
     if b.cancel != nil {

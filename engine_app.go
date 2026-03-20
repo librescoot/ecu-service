@@ -35,6 +35,8 @@ type EngineApp struct {
 	mu        sync.Mutex
 	ctx       context.Context
 	cancel    context.CancelFunc
+	canDevice string
+	bus       *can.Bus
 	lastStatus1 RedisStatus1 // Track last sent status for change detection
 	lastStatus2 RedisStatus2
 	lastStatus3 RedisStatus3
@@ -152,10 +154,12 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 	app.log.Debug("Diagnostics component initialized")
 
 	// Initialize CAN bus
+	app.canDevice = opts.CANDevice
 	bus, err := can.NewBusForInterfaceWithName(opts.CANDevice)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize CAN bus: %v", err)
 	}
+	app.bus = bus
 
 	// Create and initialize ECU
 	ecuConfig := ecu.ECUConfig{
@@ -183,12 +187,8 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 	handler := &frameHandler{app: app}
 	bus.Subscribe(handler)
 
-	// Start CAN message publishing
-	go func() {
-		if err := bus.ConnectAndPublish(); err != nil {
-			app.log.Error("CAN bus publish error: %v", err)
-		}
-	}()
+	// Start CAN bus loop with automatic reconnection
+	go app.runCANBusLoop(bus)
 
 	app.ipcRx = NewIPCRx(app.log, app.redis, app.battery, app.kers)
 	if app.ipcRx == nil {
@@ -424,6 +424,55 @@ func (app *EngineApp) stopFaultRecoveryTimers() {
 }
 
 
+// runCANBusLoop runs ConnectAndPublish in a loop, reconnecting on failure.
+// When the SocketCAN socket goes stale (e.g. after suspend/resume),
+// ConnectAndPublish returns and we must create a fresh bus.
+func (app *EngineApp) runCANBusLoop(bus *can.Bus) {
+	const (
+		initialBackoff = 500 * time.Millisecond
+		maxBackoff     = 10 * time.Second
+	)
+	backoff := initialBackoff
+
+	for {
+		select {
+		case <-app.ctx.Done():
+			return
+		default:
+		}
+
+		if err := bus.ConnectAndPublish(); err != nil {
+			app.log.Error("CAN bus error: %v", err)
+		}
+
+		// ConnectAndPublish returned — socket is dead
+		select {
+		case <-app.ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+
+		newBus, err := can.NewBusForInterfaceWithName(app.canDevice)
+		if err != nil {
+			app.log.Error("Failed to recreate CAN bus: %v", err)
+			backoff = min(backoff*2, maxBackoff)
+			continue
+		}
+
+		handler := &frameHandler{app: app}
+		newBus.Subscribe(handler)
+		app.ecu.UpdateBus(newBus)
+
+		app.mu.Lock()
+		app.bus = newBus
+		app.mu.Unlock()
+
+		app.log.Info("CAN bus reconnected on %s", app.canDevice)
+		bus = newBus
+		backoff = initialBackoff
+	}
+}
+
 func (app *EngineApp) Destroy() {
 	app.mu.Lock()
 	defer app.mu.Unlock()
@@ -432,6 +481,11 @@ func (app *EngineApp) Destroy() {
 
 	// Stop fault recovery timers
 	app.stopFaultRecoveryTimers()
+
+	// Disconnect CAN bus to unblock ConnectAndPublish
+	if app.bus != nil {
+		app.bus.Disconnect()
+	}
 
 	if app.cancel != nil {
 		app.cancel()

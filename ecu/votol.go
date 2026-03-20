@@ -276,6 +276,12 @@ func (v *VotolECU) GetBoostEnabled() bool {
 	return false
 }
 
+func (v *VotolECU) UpdateBus(bus *can.Bus) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.bus = bus
+}
+
 func (v *VotolECU) Cleanup() {
 	if v.cancel != nil {
 		v.cancel()

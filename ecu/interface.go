@@ -103,6 +103,9 @@ type ECUInterface interface {
 	// This is used after fault detection to check if faults have cleared
 	RequestStatusUpdate() error
 
+	// UpdateBus replaces the CAN bus reference (used after reconnection)
+	UpdateBus(bus *can.Bus)
+
 	// Cleanup performs any necessary cleanup
 	Cleanup()
 }
