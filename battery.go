@@ -80,6 +80,12 @@ func (b *Battery) GetActiveTemperatureState() BatteryTemperatureState {
     return BatteryTemperatureStateUnknown
 }
 
+func (b *Battery) BothActive() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.batteryData[0].Active && b.batteryData[1].Active
+}
+
 func (b *Battery) stringifyTemperatureState(state BatteryTemperatureState) string {
 	switch state {
 	case BatteryTemperatureStateCold:

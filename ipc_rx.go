@@ -38,6 +38,10 @@ type IPCRx struct {
 	boostCallback       BoostCallback
 	kersEnabledCallback KersEnabledCallback
 	kersPowerCallback   KersPowerCallback
+
+	kersPowerSingle uint16 // from settings:engine-ecu.kers-power
+	kersPowerDual   uint16 // from settings:engine-ecu.kers-power-dual
+	hasDualPower    bool   // true when kers-power-dual has been explicitly set
 }
 
 func NewIPCRx(logger *LeveledLogger, redis *redis.Client, battery *Battery, kers *KERS) *IPCRx {
@@ -88,6 +92,7 @@ func (rx *IPCRx) SetKersPowerCallback(callback KersPowerCallback) {
 	rx.mu.Unlock()
 
 	rx.handleKersPowerSetting()
+	rx.handleKersPowerDualSetting()
 }
 
 func (rx *IPCRx) setupSubscriptions() error {
@@ -188,6 +193,8 @@ func (rx *IPCRx) handleSettingsSubscription() {
 				rx.handleKersEnabledSetting()
 			case "engine-ecu.kers-power":
 				rx.handleKersPowerSetting()
+			case "engine-ecu.kers-power-dual":
+				rx.handleKersPowerDualSetting()
 			}
 
 		case *redis.Subscription:
@@ -258,12 +265,60 @@ func (rx *IPCRx) handleKersPowerSetting() {
 
 	rx.log.Info("KERS power setting changed: %d mA", current)
 
-	rx.mu.RLock()
-	callback := rx.kersPowerCallback
-	rx.mu.RUnlock()
+	rx.mu.Lock()
+	rx.kersPowerSingle = uint16(current)
+	rx.applyKersPower()
+	rx.mu.Unlock()
+}
 
-	if callback != nil {
-		if err := callback(uint16(current)); err != nil {
+func (rx *IPCRx) handleKersPowerDualSetting() {
+	value, err := rx.redis.HGet(rx.ctx, "settings", "engine-ecu.kers-power-dual").Result()
+	if err != nil {
+		if err != redis.Nil {
+			rx.log.Error("Failed to get KERS dual power setting: %v", err)
+		}
+		// Not set = fall back to single power value
+		rx.mu.Lock()
+		rx.hasDualPower = false
+		rx.applyKersPower()
+		rx.mu.Unlock()
+		return
+	}
+
+	current, err := strconv.ParseUint(value, 10, 16)
+	if err != nil {
+		rx.log.Error("Invalid KERS dual power value '%s': %v", value, err)
+		return
+	}
+
+	rx.log.Info("KERS dual power setting changed: %d mA", current)
+
+	rx.mu.Lock()
+	rx.kersPowerDual = uint16(current)
+	rx.hasDualPower = true
+	rx.applyKersPower()
+	rx.mu.Unlock()
+}
+
+// applyKersPower determines the correct KERS current based on battery state
+// and forwards it to the ECU. Must be called with rx.mu held.
+func (rx *IPCRx) applyKersPower() {
+	bothActive := rx.battery.BothActive()
+
+	var current uint16
+	if bothActive && rx.hasDualPower {
+		current = rx.kersPowerDual
+		rx.log.Info("Dual battery active -> using dual KERS power: %d mA", current)
+	} else {
+		current = rx.kersPowerSingle
+		if rx.hasDualPower {
+			rx.log.Info("Single battery active -> using single KERS power: %d mA (dual configured: %d mA)", current, rx.kersPowerDual)
+		}
+	}
+
+	callback := rx.kersPowerCallback
+	if callback != nil && current > 0 {
+		if err := callback(current); err != nil {
 			rx.log.Error("Failed to set KERS power: %v", err)
 		}
 	}
@@ -324,6 +379,11 @@ func (rx *IPCRx) handleBatterySubscription(idx int) {
 			// Update KERS based on active battery temperature state
 			rx.kers.UpdateBattery(rx.battery.GetActiveTemperatureState())
 
+			// Re-evaluate KERS power (single vs dual battery)
+			rx.mu.Lock()
+			rx.applyKersPower()
+			rx.mu.Unlock()
+
 		case *redis.Subscription:
 			rx.log.Debug("Battery subscription event: %s %s", m.Channel, m.Kind)
 		}
@@ -379,6 +439,11 @@ func (rx *IPCRx) readInitialStates() {
 
 	// Update KERS with initial battery state
 	rx.kers.UpdateBattery(rx.battery.GetActiveTemperatureState())
+
+	// Apply initial KERS power based on battery configuration
+	rx.mu.Lock()
+	rx.applyKersPower()
+	rx.mu.Unlock()
 }
 
 func (rx *IPCRx) handleVehicleState(state string) {
