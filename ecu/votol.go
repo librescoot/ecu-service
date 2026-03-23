@@ -266,6 +266,11 @@ func (v *VotolECU) SetKersCurrent(current uint16) error {
 	return nil
 }
 
+func (v *VotolECU) SetKersVoltage(voltage uint16) error {
+	// Votol ECU does not support configurable KERS voltage
+	return nil
+}
+
 func (v *VotolECU) SetBoostEnabled(enabled bool) error {
 	// Votol ECU does not support boost mode
 	return nil

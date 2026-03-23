@@ -211,6 +211,11 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 		return app.ecu.SetKersCurrent(current)
 	})
 
+	// Set KERS voltage callback to forward settings changes to ECU
+	app.ipcRx.SetKersVoltageCallback(func(voltage uint16) error {
+		return app.ecu.SetKersVoltage(voltage)
+	})
+
 	return app, nil
 }
 

@@ -20,6 +20,9 @@ type KersEnabledCallback func(enabled bool)
 // KersPowerCallback is called when the KERS power (current) setting changes
 type KersPowerCallback func(current uint16) error
 
+// KersVoltageCallback is called when the KERS voltage setting changes
+type KersVoltageCallback func(voltage uint16) error
+
 type IPCRx struct {
 	log     *LeveledLogger
 	redis   *redis.Client
@@ -38,6 +41,7 @@ type IPCRx struct {
 	boostCallback       BoostCallback
 	kersEnabledCallback KersEnabledCallback
 	kersPowerCallback   KersPowerCallback
+	kersVoltageCallback KersVoltageCallback
 
 	kersPowerSingle uint16 // from settings:engine-ecu.kers-power
 	kersPowerDual   uint16 // from settings:engine-ecu.kers-power-dual
@@ -93,6 +97,14 @@ func (rx *IPCRx) SetKersPowerCallback(callback KersPowerCallback) {
 
 	rx.handleKersPowerSetting()
 	rx.handleKersPowerDualSetting()
+}
+
+func (rx *IPCRx) SetKersVoltageCallback(callback KersVoltageCallback) {
+	rx.mu.Lock()
+	rx.kersVoltageCallback = callback
+	rx.mu.Unlock()
+
+	rx.handleKersVoltageSetting()
 }
 
 func (rx *IPCRx) setupSubscriptions() error {
@@ -195,6 +207,8 @@ func (rx *IPCRx) handleSettingsSubscription() {
 				rx.handleKersPowerSetting()
 			case "engine-ecu.kers-power-dual":
 				rx.handleKersPowerDualSetting()
+			case "engine-ecu.kers-voltage":
+				rx.handleKersVoltageSetting()
 			}
 
 		case *redis.Subscription:
@@ -320,6 +334,34 @@ func (rx *IPCRx) applyKersPower() {
 	if callback != nil && current > 0 {
 		if err := callback(current); err != nil {
 			rx.log.Error("Failed to set KERS power: %v", err)
+		}
+	}
+}
+
+func (rx *IPCRx) handleKersVoltageSetting() {
+	value, err := rx.redis.HGet(rx.ctx, "settings", "engine-ecu.kers-voltage").Result()
+	if err != nil {
+		if err != redis.Nil {
+			rx.log.Error("Failed to get KERS voltage setting: %v", err)
+		}
+		return
+	}
+
+	voltage, err := strconv.ParseUint(value, 10, 16)
+	if err != nil {
+		rx.log.Error("Invalid KERS voltage value '%s': %v", value, err)
+		return
+	}
+
+	rx.log.Info("KERS voltage setting changed: %d mV", voltage)
+
+	rx.mu.RLock()
+	callback := rx.kersVoltageCallback
+	rx.mu.RUnlock()
+
+	if callback != nil {
+		if err := callback(uint16(voltage)); err != nil {
+			rx.log.Error("Failed to set KERS voltage: %v", err)
 		}
 	}
 }

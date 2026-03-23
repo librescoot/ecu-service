@@ -3,6 +3,7 @@ package ecu
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"time"
 
 	"github.com/brutella/can"
@@ -24,8 +25,10 @@ const (
 	BoschStatusRequestFrameID = 0x4EF // Request all ECU status messages
 
 	// Constants for KERS
-	KersVoltage            = 56000 // 56V
+	DefaultKersVoltage     = 56000 // 56V
 	DefaultKersCurrent     = 10000 // 10A
+	MinKersVoltage         = 42000 // 42V
+	MaxKersVoltage         = 58000 // 58V
 	BoschGearModeEnable    = true
 
 	// Odometer calibration factor
@@ -49,6 +52,7 @@ type BoschECU struct {
 	warrantyDate    uint32 // ECU warranty date
 	kersEnabled     bool
 	kersCurrent     uint16 // KERS current in mA
+	kersVoltage     uint16 // KERS voltage in mV
 	boostEnabled    bool
 	throttleOn      bool
 	brakeOn         bool
@@ -57,6 +61,7 @@ type BoschECU struct {
 func NewBoschECU() ECUInterface {
 	return &BoschECU{
 		kersCurrent: DefaultKersCurrent,
+		kersVoltage: DefaultKersVoltage,
 	}
 }
 
@@ -272,6 +277,19 @@ func (b *BoschECU) SetKersCurrent(current uint16) error {
 	return nil
 }
 
+func (b *BoschECU) SetKersVoltage(voltage uint16) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if voltage < MinKersVoltage || voltage > MaxKersVoltage {
+		return fmt.Errorf("KERS voltage %d mV out of range [%d, %d]", voltage, MinKersVoltage, MaxKersVoltage)
+	}
+
+	b.kersVoltage = voltage
+	b.logger.Info("KERS voltage set to: %d mV", voltage)
+	return nil
+}
+
 func (b *BoschECU) SetBoostEnabled(enabled bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -295,7 +313,7 @@ func (b *BoschECU) sendControlMessage(kersEnabled, boostEnabled bool) error {
 	if kersEnabled {
 		// Send voltage/current settings first
 		data := make([]byte, 4)
-		binary.BigEndian.PutUint16(data[0:2], uint16(KersVoltage))
+		binary.BigEndian.PutUint16(data[0:2], b.kersVoltage)
 		binary.BigEndian.PutUint16(data[2:4], b.kersCurrent)
 
 		ebsFrame := can.Frame{
