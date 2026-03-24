@@ -47,6 +47,10 @@ type EngineApp struct {
 	faultUpdateTimer *time.Timer // Timer to request ECU status after fault
 	faultClearTimer  *time.Timer // Timer to force-clear stuck faults
 	hasFault         bool        // Track if we currently have an active fault
+
+	// Odometer persistence
+	odometerCache uint32
+	odometerDirty bool
 }
 
 // writeDefaultRedisState writes default values to Redis
@@ -143,8 +147,17 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 	// Write default values to Redis after ipcTx is initialized
 	app.writeDefaultRedisState()
 
+	// Restore cached odometer from last shutdown
+	if cached := loadOdometerCache(app.log); cached > 0 {
+		app.log.Info("Restoring cached odometer: %d meters", cached)
+		if err := app.ipcTx.SendStatus3(RedisStatus3{Odometer: cached}); err != nil {
+			app.log.Error("Failed to restore cached odometer: %v", err)
+		}
+	}
+
 	// Start health check goroutines
 	go app.redisHealthCheck()
+	go app.odometerCacheLoop()
 	// Note: ecuStaleDataCheck removed - ECU pauses CAN during flash writes which triggered false positives
 
 	app.kers = NewKERS(app.log, ctx, app.ipcTx)
@@ -308,6 +321,10 @@ func (app *EngineApp) updateRedisState() {
 			app.log.Error("Failed to send Status3: %v", err)
 		} else {
 			app.lastStatus3 = status3
+			if status3.Odometer > 0 {
+				app.odometerCache = status3.Odometer
+				app.odometerDirty = true
+			}
 		}
 	}
 
@@ -478,7 +495,41 @@ func (app *EngineApp) runCANBusLoop(bus *can.Bus) {
 	}
 }
 
+func (app *EngineApp) odometerCacheLoop() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-app.ctx.Done():
+			return
+		case <-ticker.C:
+			app.flushOdometerCache()
+		}
+	}
+}
+
+func (app *EngineApp) flushOdometerCache() {
+	app.mu.Lock()
+	if !app.odometerDirty {
+		app.mu.Unlock()
+		return
+	}
+	val := app.odometerCache
+	app.odometerDirty = false
+	app.mu.Unlock()
+
+	if err := saveOdometerCache(app.log, val); err != nil {
+		app.log.Error("Failed to save odometer cache: %v", err)
+		app.mu.Lock()
+		app.odometerDirty = true
+		app.mu.Unlock()
+	}
+}
+
 func (app *EngineApp) Destroy() {
+	app.flushOdometerCache()
+
 	app.mu.Lock()
 	defer app.mu.Unlock()
 
