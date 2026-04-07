@@ -312,9 +312,10 @@ func (b *BoschECU) sendControlMessage(kersEnabled, boostEnabled bool) error {
 
 	if kersEnabled {
 		// Send voltage/current settings first
+		// CAN wire format uses 10mV and 10mA units
 		data := make([]byte, 4)
-		binary.BigEndian.PutUint16(data[0:2], b.kersVoltage)
-		binary.BigEndian.PutUint16(data[2:4], b.kersCurrent)
+		binary.BigEndian.PutUint16(data[0:2], b.kersVoltage/10)
+		binary.BigEndian.PutUint16(data[2:4], b.kersCurrent/10)
 
 		ebsFrame := can.Frame{
 			ID:     BoschEBSSetFrameID,
