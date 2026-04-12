@@ -17,7 +17,9 @@ type StdLogger struct {
 	}
 }
 
-func NewStdLogger(logger interface{ Printf(format string, v ...interface{}) }) *StdLogger {
+func NewStdLogger(logger interface {
+	Printf(format string, v ...interface{})
+}) *StdLogger {
 	return &StdLogger{logger: logger}
 }
 

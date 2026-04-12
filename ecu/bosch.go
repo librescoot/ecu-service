@@ -25,11 +25,11 @@ const (
 	BoschStatusRequestFrameID = 0x4EF // Request all ECU status messages
 
 	// Constants for KERS
-	DefaultKersVoltage     = 56000 // 56V
-	DefaultKersCurrent     = 10000 // 10A
-	MinKersVoltage         = 42000 // 42V
-	MaxKersVoltage         = 58000 // 58V
-	BoschGearModeEnable    = true
+	DefaultKersVoltage  = 56000 // 56V
+	DefaultKersCurrent  = 10000 // 10A
+	MinKersVoltage      = 42000 // 42V
+	MaxKersVoltage      = 58000 // 58V
+	BoschGearModeEnable = true
 
 	// Odometer calibration factor
 	OdometerCalibrationFactor = 1.07

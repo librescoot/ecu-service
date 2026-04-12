@@ -18,11 +18,11 @@ const (
 )
 
 type Diag struct {
-	log          *LeveledLogger
-	redis        *redis.Client
-	mu           sync.RWMutex
-	faultStates  map[ecu.ECUFault]bool
-	ctx          context.Context
+	log         *LeveledLogger
+	redis       *redis.Client
+	mu          sync.RWMutex
+	faultStates map[ecu.ECUFault]bool
+	ctx         context.Context
 }
 
 func NewDiag(logger *LeveledLogger, redis *redis.Client) *Diag {

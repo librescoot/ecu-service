@@ -11,10 +11,10 @@ import (
 type testLogger struct{}
 
 func (l *testLogger) Printf(format string, v ...interface{}) {}
-func (l *testLogger) Debug(format string, v ...interface{})   {}
-func (l *testLogger) Info(format string, v ...interface{})    {}
-func (l *testLogger) Warn(format string, v ...interface{})    {}
-func (l *testLogger) Error(format string, v ...interface{})   {}
+func (l *testLogger) Debug(format string, v ...interface{})  {}
+func (l *testLogger) Info(format string, v ...interface{})   {}
+func (l *testLogger) Warn(format string, v ...interface{})   {}
+func (l *testLogger) Error(format string, v ...interface{})  {}
 func (l *testLogger) DebugCAN(direction string, id uint32, data []byte, length uint8) {
 }
 
@@ -41,9 +41,9 @@ func TestSpeedBuffer_WindowFill(t *testing.T) {
 
 func TestSpeedBuffer_WindowSlide(t *testing.T) {
 	var buf SpeedBuffer
-	buf.MovingAverage(100) // [100, 0, 0] count=1
-	buf.MovingAverage(200) // [100, 200, 0] count=2
-	buf.MovingAverage(300) // [100, 200, 300] count=3
+	buf.MovingAverage(100)        // [100, 0, 0] count=1
+	buf.MovingAverage(200)        // [100, 200, 0] count=2
+	buf.MovingAverage(300)        // [100, 200, 300] count=3
 	avg := buf.MovingAverage(400) // replaces 100: [400, 200, 300] sum=900
 	expected := 300.0
 	if avg != expected {

@@ -36,18 +36,18 @@ type FaultConfig struct {
 }
 
 var faultConfigs = map[ECUFault]FaultConfig{
-	FaultBatteryOverVoltage:        {FaultBatteryOverVoltage, "Battery over-voltage", SeverityCritical},
-	FaultBatteryUnderVoltage:       {FaultBatteryUnderVoltage, "Battery under-voltage", SeverityCritical},
-	FaultMotorShortCircuit:         {FaultMotorShortCircuit, "Motor short-circuit", SeverityCritical},
-	FaultMotorStalled:              {FaultMotorStalled, "Motor stalled", SeverityCritical},
-	FaultHallSensorAbnormal:        {FaultHallSensorAbnormal, "Hall sensor abnormal", SeverityCritical},
-	FaultMOSFETCheckError:          {FaultMOSFETCheckError, "MOSFET check error", SeverityCritical},
-	FaultMotorOpenCircuit:          {FaultMotorOpenCircuit, "Motor open-circuit", SeverityCritical},
-	FaultPowerOnSelfCheckError:     {FaultPowerOnSelfCheckError, "Power-on self-check error", SeverityCritical},
-	FaultOverTemperature:           {FaultOverTemperature, "Over-temperature", SeverityCritical},
-	FaultThrottleAbnormal:          {FaultThrottleAbnormal, "Throttle abnormal", SeverityCritical},
-	FaultInternal15vAbnormal:       {FaultInternal15vAbnormal, "Internal 15V abnormal", SeverityCritical},
-	FaultThrottleActiveAtPowerUp:   {FaultThrottleActiveAtPowerUp, "Throttle active at power up", SeverityWarning},
+	FaultBatteryOverVoltage:         {FaultBatteryOverVoltage, "Battery over-voltage", SeverityCritical},
+	FaultBatteryUnderVoltage:        {FaultBatteryUnderVoltage, "Battery under-voltage", SeverityCritical},
+	FaultMotorShortCircuit:          {FaultMotorShortCircuit, "Motor short-circuit", SeverityCritical},
+	FaultMotorStalled:               {FaultMotorStalled, "Motor stalled", SeverityCritical},
+	FaultHallSensorAbnormal:         {FaultHallSensorAbnormal, "Hall sensor abnormal", SeverityCritical},
+	FaultMOSFETCheckError:           {FaultMOSFETCheckError, "MOSFET check error", SeverityCritical},
+	FaultMotorOpenCircuit:           {FaultMotorOpenCircuit, "Motor open-circuit", SeverityCritical},
+	FaultPowerOnSelfCheckError:      {FaultPowerOnSelfCheckError, "Power-on self-check error", SeverityCritical},
+	FaultOverTemperature:            {FaultOverTemperature, "Over-temperature", SeverityCritical},
+	FaultThrottleAbnormal:           {FaultThrottleAbnormal, "Throttle abnormal", SeverityCritical},
+	FaultInternal15vAbnormal:        {FaultInternal15vAbnormal, "Internal 15V abnormal", SeverityCritical},
+	FaultThrottleActiveAtPowerUp:    {FaultThrottleActiveAtPowerUp, "Throttle active at power up", SeverityWarning},
 	FaultMotorTemperatureProtection: {FaultMotorTemperatureProtection, "Motor temperature protection", SeverityWarning},
 }
 

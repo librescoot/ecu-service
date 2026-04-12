@@ -24,19 +24,19 @@ const (
 )
 
 type EngineApp struct {
-	log       *LeveledLogger
-	redis     *redis.Client
-	ipcRx     *IPCRx
-	ipcTx     *IPCTx
-	battery   *Battery
-	ecu       ecu.ECUInterface
-	diag      *Diag
-	kers      *KERS
-	mu        sync.Mutex
-	ctx       context.Context
-	cancel    context.CancelFunc
-	canDevice string
-	bus       *can.Bus
+	log         *LeveledLogger
+	redis       *redis.Client
+	ipcRx       *IPCRx
+	ipcTx       *IPCTx
+	battery     *Battery
+	ecu         ecu.ECUInterface
+	diag        *Diag
+	kers        *KERS
+	mu          sync.Mutex
+	ctx         context.Context
+	cancel      context.CancelFunc
+	canDevice   string
+	bus         *can.Bus
 	lastStatus1 RedisStatus1 // Track last sent status for change detection
 	lastStatus2 RedisStatus2
 	lastStatus3 RedisStatus3
@@ -444,7 +444,6 @@ func (app *EngineApp) stopFaultRecoveryTimers() {
 		app.faultClearTimer = nil
 	}
 }
-
 
 // runCANBusLoop runs ConnectAndPublish in a loop, reconnecting on failure.
 // When the SocketCAN socket goes stale (e.g. after suspend/resume),
