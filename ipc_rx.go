@@ -43,9 +43,10 @@ type IPCRx struct {
 	kersPowerCallback   KersPowerCallback
 	kersVoltageCallback KersVoltageCallback
 
-	kersPowerSingle uint16 // from settings:engine-ecu.kers-power
-	kersPowerDual   uint16 // from settings:engine-ecu.kers-power-dual
-	hasDualPower    bool   // true when kers-power-dual has been explicitly set
+	kersPowerSingle    uint16 // from settings:engine-ecu.kers-power
+	kersPowerDual      uint16 // from settings:engine-ecu.kers-power-dual
+	hasDualPower       bool   // true when kers-power-dual has been explicitly set
+	lastAppliedCurrent uint16 // last value sent to ECU, to suppress redundant updates
 }
 
 func NewIPCRx(logger *LeveledLogger, redis *redis.Client, battery *Battery, kers *KERS) *IPCRx {
@@ -329,6 +330,11 @@ func (rx *IPCRx) applyKersPower() {
 			rx.log.Info("Single battery active -> using single KERS power: %d mA (dual configured: %d mA)", current, rx.kersPowerDual)
 		}
 	}
+
+	if current == rx.lastAppliedCurrent {
+		return
+	}
+	rx.lastAppliedCurrent = current
 
 	callback := rx.kersPowerCallback
 	if callback != nil && current > 0 {
