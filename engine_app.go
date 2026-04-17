@@ -50,6 +50,8 @@ type EngineApp struct {
 
 	// ECU comm-lost watchdog (E20)
 	commLostPublished bool
+	prevMainPowerOn   bool
+	powerOnEdge       time.Time // last time main-power transitioned off -> on
 
 	// Odometer persistence
 	odometerCache uint32
@@ -554,6 +556,14 @@ func (app *EngineApp) checkCommLost() {
 	ecuExpectedAlive := state == "parked" || state == "ready-to-drive"
 	powerOn := mainPower == "on"
 
+	app.mu.Lock()
+	if powerOn && !app.prevMainPowerOn {
+		app.powerOnEdge = time.Now()
+	}
+	app.prevMainPowerOn = powerOn
+	inPowerOnGrace := !app.powerOnEdge.IsZero() && time.Since(app.powerOnEdge) < 2*time.Second
+	app.mu.Unlock()
+
 	// Prod the ECU with 0x4EF while it's expected to be alive. At idle (speed
 	// zero in ready-to-drive) the ECU fires Status frames at ~0.5 Hz on its
 	// own, well below ECUDataTimeout, which would produce spurious E20s.
@@ -566,7 +576,11 @@ func (app *EngineApp) checkCommLost() {
 	}
 
 	stale := app.ecu.IsDataStale()
-	shouldRaise := stale && powerOn && ecuExpectedAlive
+	// Don't raise E20 during the first 2s after main-power comes on — the ECU
+	// needs time to boot and respond to our 0x4EF poll. Without this grace
+	// window the very first watchdog tick after unlock would raise E20
+	// because IsDataStale() is trivially true (no frames received yet).
+	shouldRaise := stale && powerOn && ecuExpectedAlive && !inPowerOnGrace
 
 	app.mu.Lock()
 	defer app.mu.Unlock()
