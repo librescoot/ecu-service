@@ -572,6 +572,7 @@ func (app *EngineApp) checkCommLost() {
 		}
 		app.lastStatus2 = status2
 		app.commLostPublished = true
+		app.diag.SetFaultPresence(ecu.FaultECUCommLost, true)
 		app.log.Warn("ECU communication lost (>%v) in state=%s, publishing E20", ecu.ECUDataTimeout, state)
 
 	case !shouldRaise && app.commLostPublished:
@@ -596,6 +597,7 @@ func (app *EngineApp) checkCommLost() {
 		}
 		app.lastStatus2 = status2
 		app.commLostPublished = false
+		app.diag.SetFaultPresence(ecu.FaultECUCommLost, false)
 		app.log.Info("E20 cleared; restored fault:code=%d", faultCode)
 	}
 }
