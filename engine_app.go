@@ -548,12 +548,24 @@ func (app *EngineApp) commLostWatcher() {
 }
 
 func (app *EngineApp) checkCommLost() {
-	stale := app.ecu.IsDataStale()
 	mainPower := app.redisGetVehicleField("main-power")
 	state := app.redisGetVehicleField("state")
 
 	ecuExpectedAlive := state == "parked" || state == "ready-to-drive"
 	powerOn := mainPower == "on"
+
+	// Prod the ECU with 0x4EF while it's expected to be alive. At idle (speed
+	// zero in ready-to-drive) the ECU fires Status frames at ~0.5 Hz on its
+	// own, well below ECUDataTimeout, which would produce spurious E20s.
+	// Polling forces a full status burst on every tick so the stale timer
+	// stays reset.
+	if ecuExpectedAlive && powerOn {
+		if err := app.ecu.RequestStatusUpdate(); err != nil {
+			app.log.Debug("ECU status poll failed: %v", err)
+		}
+	}
+
+	stale := app.ecu.IsDataStale()
 	shouldRaise := stale && powerOn && ecuExpectedAlive
 
 	app.mu.Lock()
