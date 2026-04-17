@@ -187,6 +187,9 @@ func (b *BoschECU) handleStatus2Frame(frame can.Frame) error {
 	if faultCode == 15 {
 		faultCode = 0
 	}
+	if faultCode != b.faultCode {
+		b.logger.Info("ECU fault_code transition %d -> %d (temperature=%d)", b.faultCode, faultCode, b.temperature)
+	}
 	b.faultCode = faultCode
 
 	return nil
