@@ -22,6 +22,11 @@ const (
 	FaultInternal15vAbnormal
 )
 
+// Service-synthesised faults start at 20. Range 17-19 reserved for firmware.
+const (
+	FaultECUCommLost ECUFault = 20
+)
+
 type FaultSeverity int
 
 const (
@@ -49,6 +54,7 @@ var faultConfigs = map[ECUFault]FaultConfig{
 	FaultInternal15vAbnormal:        {FaultInternal15vAbnormal, "Internal 15V abnormal", SeverityCritical},
 	FaultThrottleActiveAtPowerUp:    {FaultThrottleActiveAtPowerUp, "Throttle active at power up", SeverityWarning},
 	FaultMotorTemperatureProtection: {FaultMotorTemperatureProtection, "Motor temperature protection", SeverityWarning},
+	FaultECUCommLost:                {FaultECUCommLost, "ECU communication lost", SeverityCritical},
 }
 
 func GetFaultConfig(fault ECUFault) (FaultConfig, bool) {

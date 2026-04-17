@@ -48,6 +48,9 @@ type EngineApp struct {
 	faultClearTimer  *time.Timer // Timer to force-clear stuck faults
 	hasFault         bool        // Track if we currently have an active fault
 
+	// ECU comm-lost watchdog (E20)
+	commLostPublished bool
+
 	// Odometer persistence
 	odometerCache uint32
 	odometerDirty bool
@@ -158,7 +161,7 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 	// Start health check goroutines
 	go app.redisHealthCheck()
 	go app.odometerCacheLoop()
-	// Note: ecuStaleDataCheck removed - ECU pauses CAN during flash writes which triggered false positives
+	go app.commLostWatcher()
 
 	app.kers = NewKERS(app.log, ctx, app.ipcTx)
 	app.log.Debug("KERS component initialized")
@@ -524,6 +527,88 @@ func (app *EngineApp) flushOdometerCache() {
 		app.odometerDirty = true
 		app.mu.Unlock()
 	}
+}
+
+// commLostWatcher raises fault E20 when the ECU should be alive and powered
+// but hasn't sent a CAN frame within ECUDataTimeout. Gated on vehicle state
+// and main-power so we don't raise during normal standby or when 48V is down
+// (in which case the cause is already visible via vehicle:main-power).
+func (app *EngineApp) commLostWatcher() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-app.ctx.Done():
+			return
+		case <-ticker.C:
+			app.checkCommLost()
+		}
+	}
+}
+
+func (app *EngineApp) checkCommLost() {
+	stale := app.ecu.IsDataStale()
+	mainPower := app.redisGetVehicleField("main-power")
+	state := app.redisGetVehicleField("state")
+
+	ecuExpectedAlive := state == "parked" || state == "ready-to-drive"
+	powerOn := mainPower == "on"
+	shouldRaise := stale && powerOn && ecuExpectedAlive
+
+	app.mu.Lock()
+	defer app.mu.Unlock()
+
+	switch {
+	case shouldRaise && !app.commLostPublished:
+		status2 := RedisStatus2{
+			Temperature:      int(app.ecu.GetTemperature()),
+			FaultCode:        uint32(ecu.FaultECUCommLost),
+			FaultDescription: "ECU communication lost",
+		}
+		if err := app.ipcTx.SendStatus2(status2); err != nil {
+			app.log.Error("Failed to publish E20: %v", err)
+			return
+		}
+		app.lastStatus2 = status2
+		app.commLostPublished = true
+		app.log.Warn("ECU communication lost (>%v) in state=%s, publishing E20", ecu.ECUDataTimeout, state)
+
+	case !shouldRaise && app.commLostPublished:
+		faultCode := app.ecu.GetFaultCode()
+		faultDesc := ""
+		if faultCode != 0 {
+			for fault := range app.ecu.GetActiveFaults() {
+				if cfg, ok := ecu.GetFaultConfig(fault); ok {
+					faultDesc = cfg.Description
+					break
+				}
+			}
+		}
+		status2 := RedisStatus2{
+			Temperature:      int(app.ecu.GetTemperature()),
+			FaultCode:        faultCode,
+			FaultDescription: faultDesc,
+		}
+		if err := app.ipcTx.SendStatus2(status2); err != nil {
+			app.log.Error("Failed to clear E20: %v", err)
+			return
+		}
+		app.lastStatus2 = status2
+		app.commLostPublished = false
+		app.log.Info("E20 cleared; restored fault:code=%d", faultCode)
+	}
+}
+
+func (app *EngineApp) redisGetVehicleField(field string) string {
+	ctx, cancel := context.WithTimeout(app.ctx, 500*time.Millisecond)
+	defer cancel()
+	val, err := app.redis.HGet(ctx, "vehicle", field).Result()
+	if err != nil && err != redis.Nil {
+		app.log.Warn("Failed to read vehicle:%s: %v", field, err)
+		return ""
+	}
+	return val
 }
 
 func (app *EngineApp) Destroy() {
