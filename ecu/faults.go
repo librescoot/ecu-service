@@ -18,7 +18,7 @@ const (
 	FaultThrottleAbnormal
 	FaultMotorTemperatureProtection
 	FaultThrottleActiveAtPowerUp
-	FaultReserved15
+	FaultBrakingActiveAtPowerUp // filtered at CAN ingest — see bosch.go
 	FaultInternal15vAbnormal
 )
 
@@ -53,6 +53,7 @@ var faultConfigs = map[ECUFault]FaultConfig{
 	FaultThrottleAbnormal:           {FaultThrottleAbnormal, "Throttle abnormal", SeverityCritical},
 	FaultInternal15vAbnormal:        {FaultInternal15vAbnormal, "Internal 15V abnormal", SeverityCritical},
 	FaultThrottleActiveAtPowerUp:    {FaultThrottleActiveAtPowerUp, "Throttle active at power up", SeverityWarning},
+	FaultBrakingActiveAtPowerUp:     {FaultBrakingActiveAtPowerUp, "Braking active at power up", SeverityWarning},
 	FaultMotorTemperatureProtection: {FaultMotorTemperatureProtection, "Motor temperature protection", SeverityWarning},
 	FaultECUCommLost:                {FaultECUCommLost, "ECU communication lost", SeverityCritical},
 }
@@ -90,7 +91,7 @@ var votolFaultMap = map[uint32]ECUFault{
 	0x02: FaultHallSensorAbnormal,
 	0x04: FaultThrottleAbnormal,
 	0x08: FaultPowerOnSelfCheckError,
-	0x10: FaultReserved15,
+	0x10: FaultBrakingActiveAtPowerUp,
 	0x20: FaultOverTemperature,
 	0x40: FaultInternal15vAbnormal,
 }
