@@ -113,6 +113,11 @@ func (b *BaseECU) IsDataStale() bool {
 	return time.Since(b.lastFrameTime) > ECUDataTimeout
 }
 
+// TimeSinceLastFrame returns how long ago the most recent CAN frame arrived.
+func (b *BaseECU) TimeSinceLastFrame() time.Duration {
+	return time.Since(b.lastFrameTime)
+}
+
 // calculateSpeed processes raw speed input using calibration and averaging
 func (b *BaseECU) calculateSpeed(rawSpeed uint16) uint16 {
 	if rawSpeed == 0 {

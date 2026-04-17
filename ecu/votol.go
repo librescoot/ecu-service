@@ -306,6 +306,11 @@ func (v *VotolECU) IsDataStale() bool {
 	return false
 }
 
+// TimeSinceLastFrame returns 0 for Votol — staleness tracking not implemented.
+func (v *VotolECU) TimeSinceLastFrame() time.Duration {
+	return 0
+}
+
 // GetGear returns 0 for Votol ECU (gear selection not supported)
 func (v *VotolECU) GetGear() uint8 {
 	return 0

@@ -2,6 +2,7 @@ package ecu
 
 import (
 	"context"
+	"time"
 
 	"github.com/brutella/can"
 )
@@ -101,6 +102,9 @@ type ECUInterface interface {
 
 	// IsDataStale returns true if no data has been received recently
 	IsDataStale() bool
+
+	// TimeSinceLastFrame returns how long ago the last CAN frame arrived.
+	TimeSinceLastFrame() time.Duration
 
 	// RequestStatusUpdate sends a CAN message to request the ECU to send all status frames
 	// This is used after fault detection to check if faults have cleared

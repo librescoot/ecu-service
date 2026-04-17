@@ -564,12 +564,13 @@ func (app *EngineApp) checkCommLost() {
 	inPowerOnGrace := !app.powerOnEdge.IsZero() && time.Since(app.powerOnEdge) < 2*time.Second
 	app.mu.Unlock()
 
-	// Prod the ECU with 0x4EF while it's expected to be alive. At idle (speed
-	// zero in ready-to-drive) the ECU fires Status frames at ~0.5 Hz on its
-	// own, well below ECUDataTimeout, which would produce spurious E20s.
-	// Polling forces a full status burst on every tick so the stale timer
-	// stays reset.
-	if ecuExpectedAlive && powerOn {
+	// Prod the ECU with 0x4EF only when we haven't heard from it recently.
+	// While driving the ECU pushes Status frames at ~5 Hz on its own, so
+	// polling then would just add bus noise. Idle in ready-to-drive drops
+	// to ~0.5 Hz, below ECUDataTimeout — poll proactively there to keep the
+	// stale timer reset without waiting for the timeout.
+	const pollAfter = 700 * time.Millisecond
+	if ecuExpectedAlive && powerOn && app.ecu.TimeSinceLastFrame() > pollAfter {
 		if err := app.ecu.RequestStatusUpdate(); err != nil {
 			app.log.Debug("ECU status poll failed: %v", err)
 		}
