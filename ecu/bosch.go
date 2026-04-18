@@ -259,7 +259,7 @@ func (b *BoschECU) handleStatus5Frame(frame can.Frame) error {
 	//   [4:8] software_version
 	b.warrantyDate = binary.BigEndian.Uint32(frame.Data[0:4])
 	b.firmwareVersion = binary.BigEndian.Uint32(frame.Data[4:8])
-	b.logger.Info("ECU firmware version: 0x%08X (warranty: 0x%08X)", b.firmwareVersion, b.warrantyDate)
+	b.logger.Debug("ECU firmware version: 0x%08X (warranty: 0x%08X)", b.firmwareVersion, b.warrantyDate)
 
 	return nil
 }
