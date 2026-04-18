@@ -570,13 +570,19 @@ func (app *EngineApp) checkCommLost() {
 	// to ~0.5 Hz, below ECUDataTimeout — poll proactively there to keep the
 	// stale timer reset without waiting for the timeout.
 	const pollAfter = 700 * time.Millisecond
+	// Raise threshold is deliberately longer than pollAfter + worst-case
+	// response latency. The ECU takes up to ~1s to reply to 0x4EF (the full
+	// 0x7E0-0x7E8 burst is spread over several main-loop iterations). If we
+	// raised at pollAfter we'd flash E20 on every state edge into an active
+	// state because our own poll response hasn't landed yet.
+	const raiseAfter = 2 * time.Second
 	if ecuExpectedAlive && powerOn && app.ecu.TimeSinceLastFrame() > pollAfter {
 		if err := app.ecu.RequestStatusUpdate(); err != nil {
 			app.log.Debug("ECU status poll failed: %v", err)
 		}
 	}
 
-	stale := app.ecu.IsDataStale()
+	stale := app.ecu.TimeSinceLastFrame() > raiseAfter
 	// Don't raise E20 during the first 2s after main-power comes on — the ECU
 	// needs time to boot and respond to our 0x4EF poll. Without this grace
 	// window the very first watchdog tick after unlock would raise E20
