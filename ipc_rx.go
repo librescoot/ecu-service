@@ -139,7 +139,7 @@ func (rx *IPCRx) handleVehicleSubscription() {
 	for {
 		msg, err := rx.vehicleSubscription.Receive(rx.ctx)
 		if err != nil {
-			if err == context.Canceled {
+			if rx.ctx.Err() != nil {
 				return
 			}
 			// Check for closed client - panic to trigger systemd restart
@@ -182,7 +182,7 @@ func (rx *IPCRx) handleSettingsSubscription() {
 	for {
 		msg, err := rx.settingsSubscription.Receive(rx.ctx)
 		if err != nil {
-			if err == context.Canceled {
+			if rx.ctx.Err() != nil {
 				return
 			}
 			// Check for closed client - panic to trigger systemd restart
@@ -378,7 +378,7 @@ func (rx *IPCRx) handleBatterySubscription(idx int) {
 	for {
 		msg, err := rx.batterySubscriptions[idx].Receive(rx.ctx)
 		if err != nil {
-			if err == context.Canceled {
+			if rx.ctx.Err() != nil {
 				return
 			}
 			// Check for closed client - panic to trigger systemd restart
