@@ -575,18 +575,25 @@ func (app *EngineApp) checkCommLost() {
 	// 0x7E0-0x7E8 burst is spread over several main-loop iterations). If we
 	// raised at pollAfter we'd flash E20 on every state edge into an active
 	// state because our own poll response hasn't landed yet.
-	const raiseAfter = 2 * time.Second
+	const raiseAfter = 3 * time.Second
 	if ecuExpectedAlive && powerOn && app.ecu.TimeSinceLastFrame() > pollAfter {
 		if err := app.ecu.RequestStatusUpdate(); err != nil {
 			app.log.Debug("ECU status poll failed: %v", err)
 		}
 	}
 
-	stale := app.ecu.TimeSinceLastFrame() > raiseAfter
-	// Don't raise E20 during the first 2s after main-power comes on — the ECU
-	// needs time to boot and respond to our 0x4EF poll. Without this grace
-	// window the very first watchdog tick after unlock would raise E20
-	// because IsDataStale() is trivially true (no frames received yet).
+	// Measure staleness from the more recent of {last frame, power-on edge}.
+	// Without this, lastFrameTime carries over from the previous power cycle
+	// (potentially minutes old), so the moment the grace window expires the
+	// staleness check is already tripped and E20 flashes until the ECU's
+	// first post-boot frame lands.
+	frameAge := app.ecu.TimeSinceLastFrame()
+	if !app.powerOnEdge.IsZero() {
+		if since := time.Since(app.powerOnEdge); since < frameAge {
+			frameAge = since
+		}
+	}
+	stale := frameAge > raiseAfter
 	shouldRaise := stale && powerOn && ecuExpectedAlive && !inPowerOnGrace
 
 	app.mu.Lock()
