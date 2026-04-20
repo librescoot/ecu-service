@@ -594,7 +594,8 @@ func (app *EngineApp) checkCommLost() {
 		}
 	}
 	stale := frameAge > raiseAfter
-	shouldRaise := stale && powerOn && ecuExpectedAlive && !inPowerOnGrace
+	moving := app.ecu.GetSpeed() != 0
+	shouldRaise := stale && powerOn && ecuExpectedAlive && !inPowerOnGrace && moving
 
 	app.mu.Lock()
 	defer app.mu.Unlock()
