@@ -50,8 +50,8 @@ type EngineApp struct {
 
 	// ECU comm-lost watchdog (E20)
 	commLostPublished bool
-	prevMainPowerOn   bool
-	powerOnEdge       time.Time // last time main-power transitioned off -> on
+	prevEcuPowered    bool
+	powerOnEdge       time.Time // last time engine-power && main-power transitioned false -> true
 
 	// Odometer persistence
 	odometerCache uint32
@@ -551,16 +551,21 @@ func (app *EngineApp) commLostWatcher() {
 
 func (app *EngineApp) checkCommLost() {
 	mainPower := app.redisGetVehicleField("main-power")
+	enginePower := app.redisGetVehicleField("engine-power")
 	state := app.redisGetVehicleField("state")
 
-	ecuExpectedAlive := state == "parked" || state == "ready-to-drive"
-	powerOn := mainPower == "on"
+	// ECU is expected to talk iff vehicle-service commanded engine_power ON
+	// (so the ECU has been told to boot) AND the battery is active (48V rail
+	// supplied). Both conditions must hold; either alone is insufficient.
+	engineCommanded := enginePower == "on"
+	batteryActive := mainPower == "on"
+	ecuPowered := engineCommanded && batteryActive
 
 	app.mu.Lock()
-	if powerOn && !app.prevMainPowerOn {
+	if ecuPowered && !app.prevEcuPowered {
 		app.powerOnEdge = time.Now()
 	}
-	app.prevMainPowerOn = powerOn
+	app.prevEcuPowered = ecuPowered
 	inPowerOnGrace := !app.powerOnEdge.IsZero() && time.Since(app.powerOnEdge) < 2*time.Second
 	app.mu.Unlock()
 
@@ -576,7 +581,7 @@ func (app *EngineApp) checkCommLost() {
 	// raised at pollAfter we'd flash E20 on every state edge into an active
 	// state because our own poll response hasn't landed yet.
 	const raiseAfter = 3 * time.Second
-	if ecuExpectedAlive && powerOn && app.ecu.TimeSinceLastFrame() > pollAfter {
+	if ecuPowered && app.ecu.TimeSinceLastFrame() > pollAfter {
 		if err := app.ecu.RequestStatusUpdate(); err != nil {
 			app.log.Debug("ECU status poll failed: %v", err)
 		}
@@ -595,7 +600,7 @@ func (app *EngineApp) checkCommLost() {
 	}
 	stale := frameAge > raiseAfter
 	moving := app.ecu.GetSpeed() != 0
-	shouldRaise := stale && powerOn && ecuExpectedAlive && !inPowerOnGrace && moving
+	shouldRaise := stale && ecuPowered && !inPowerOnGrace && moving
 
 	app.mu.Lock()
 	defer app.mu.Unlock()
