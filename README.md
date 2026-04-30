@@ -1,8 +1,8 @@
-# LibreScoot ECU Service
-
-[![CC BY-NC-SA 4.0][cc-by-nc-sa-shield]][cc-by-nc-sa]
+# Librescoot ECU Service
 
 A Go-based service for interfacing with electric scooter Engine Control Units (ECUs). This service provides a unified interface for communicating with different types of ECUs (Bosch and Votol) through CAN bus, with state management via Redis.
+
+Part of the [Librescoot](https://librescoot.org/) open-source platform.
 
 ## Features
 
@@ -71,14 +71,14 @@ Run the service with default settings:
 
 ## License
 
-This work is licensed under a
+This project is dual-licensed. The source code is available under the
 [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License][cc-by-nc-sa].
+The maintainers reserve the right to grant separate licenses for commercial distribution; please contact the maintainers to discuss commercial licensing.
 
 [![CC BY-NC-SA 4.0][cc-by-nc-sa-image]][cc-by-nc-sa]
 
 [cc-by-nc-sa]: http://creativecommons.org/licenses/by-nc-sa/4.0/
 [cc-by-nc-sa-image]: https://licensebuttons.net/l/by-nc-sa/4.0/88x31.png
-[cc-by-nc-sa-shield]: https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg
 
 ## Contributing
 
@@ -86,4 +86,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ---
 
-Made with ❤️ by the LibreScoot community
+Made with ❤️ by the Librescoot community
