@@ -35,7 +35,7 @@ type SoftwareVersion struct {
 	MotorRatedPowerKW uint8  // Motor rated power in kW
 	MotorMaxSpeedKMH  uint8  // Motor max speed in km/h
 	BaseVersion       string // e.g. "4.0"
-	AppVersion        string // e.g. "0.C"
+	AppVersion        string // e.g. "12" (revision number, decimal value of the byte)
 }
 
 // ConfigReport captures the ECU's operating configuration as broadcast at

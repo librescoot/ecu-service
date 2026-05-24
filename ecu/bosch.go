@@ -374,7 +374,7 @@ func (b *BoschECU) handleStatus5Frame(frame can.Frame) error {
 
 	b.logger.Debug("ECU firmware: %dkW / %dkm/h / base=%s / app=%s",
 		b.motorRatedPowerKW, b.motorMaxSpeedKMH,
-		formatBCDVersion(b.swBaseVersion), formatBCDVersion(b.swAppVersion))
+		formatBCDVersion(b.swBaseVersion), formatAppVersion(b.swAppVersion))
 
 	return nil
 }
@@ -455,6 +455,13 @@ func bcdByteToDecimal(b byte) uint8 {
 // leak hex into the low nibble once the BCD digit space is exhausted).
 func formatBCDVersion(b byte) string {
 	return fmt.Sprintf("%X.%X", b>>4, b&0x0F)
+}
+
+// formatAppVersion renders the application SW version byte as its
+// decimal value. The byte appears to be a revision number rather than
+// a major.minor pair, so 0x0C becomes "12" rather than "0.C" or "0C".
+func formatAppVersion(b byte) string {
+	return fmt.Sprintf("%d", b)
 }
 
 func (b *BoschECU) SetKersEnabled(enabled bool) error {
@@ -708,7 +715,7 @@ func (b *BoschECU) GetSoftwareVersion() SoftwareVersion {
 		MotorRatedPowerKW: b.motorRatedPowerKW,
 		MotorMaxSpeedKMH:  b.motorMaxSpeedKMH,
 		BaseVersion:       formatBCDVersion(b.swBaseVersion),
-		AppVersion:        formatBCDVersion(b.swAppVersion),
+		AppVersion:        formatAppVersion(b.swAppVersion),
 	}
 }
 

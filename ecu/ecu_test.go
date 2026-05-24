@@ -461,7 +461,7 @@ func TestBoschStatus5_SoftwareVersion(t *testing.T) {
 	}
 
 	sw := b.GetSoftwareVersion()
-	want := SoftwareVersion{MotorRatedPowerKW: 4, MotorMaxSpeedKMH: 45, BaseVersion: "4.0", AppVersion: "0.C"}
+	want := SoftwareVersion{MotorRatedPowerKW: 4, MotorMaxSpeedKMH: 45, BaseVersion: "4.0", AppVersion: "12"}
 	if sw != want {
 		t.Errorf("software version: expected %+v, got %+v", want, sw)
 	}
