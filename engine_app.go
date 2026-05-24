@@ -37,12 +37,13 @@ type EngineApp struct {
 	cancel      context.CancelFunc
 	canDevice   string
 	bus         *can.Bus
-	lastStatus1 RedisStatus1 // Track last sent status for change detection
-	lastStatus2 RedisStatus2
-	lastStatus3 RedisStatus3
-	lastStatus4 RedisStatus4
-	lastStatus5 RedisStatus5
-	lastEBS     RedisEBS
+	lastStatus1   RedisStatus1 // Track last sent status for change detection
+	lastStatus2   RedisStatus2
+	lastStatus3   RedisStatus3
+	lastStatus4   RedisStatus4
+	lastStatus5   RedisStatus5
+	lastEBS       RedisEBS
+	lastECUConfig RedisECUConfig
 
 	// Fault recovery timers
 	faultUpdateTimer *time.Timer // Timer to request ECU status after fault
@@ -317,8 +318,11 @@ func (app *EngineApp) updateRedisState() {
 	}
 
 	status4 := RedisStatus4{
-		KersOn:  app.ecu.GetKersEnabled(),
-		BoostOn: app.ecu.GetBoostEnabled(),
+		KersOn:          app.ecu.GetKersEnabled(),
+		BoostOn:         app.ecu.GetBoostEnabled(),
+		EcuEnabled:      app.ecu.GetECUStatusEnabled(),
+		BoostActive:     app.ecu.GetBoostActive(),
+		GearModeEnabled: app.ecu.GetGearModeEnabled(),
 	}
 
 	if status2 != app.lastStatus2 {
@@ -368,9 +372,21 @@ func (app *EngineApp) updateRedisState() {
 		}
 	}
 
+	sw := app.ecu.GetSoftwareVersion()
+	ratios := app.ecu.GetGearRatios()
 	status5 := RedisStatus5{
-		FirmwareVersion: app.ecu.GetFirmwareVersion(),
-		Gear:            app.ecu.GetGear(),
+		FirmwareVersion:   app.ecu.GetFirmwareVersion(),
+		Gear:              app.ecu.GetGear(),
+		MotorRatedPowerKW: sw.MotorRatedPowerKW,
+		MotorMaxSpeedKMH:  sw.MotorMaxSpeedKMH,
+		SWBaseVersion:     sw.BaseVersion,
+		SWAppVersion:      sw.AppVersion,
+		HighGearCurrent:   ratios.HighCurrent,
+		MidGearCurrent:    ratios.MidCurrent,
+		LowGearCurrent:    ratios.LowCurrent,
+		HighGearTorque:    ratios.HighTorque,
+		MidGearTorque:     ratios.MidTorque,
+		LowGearTorque:     ratios.LowTorque,
 	}
 
 	if status5 != app.lastStatus5 {
@@ -378,6 +394,26 @@ func (app *EngineApp) updateRedisState() {
 			app.log.Error("Failed to send Status5: %v", err)
 		} else {
 			app.lastStatus5 = status5
+		}
+	}
+
+	cfg := app.ecu.GetConfigReport()
+	ecuConfig := RedisECUConfig{
+		OverVoltageThresholdMV:  cfg.OverVoltageThresholdMV,
+		UnderVoltageThresholdMV: cfg.UnderVoltageThresholdMV,
+		SpeedLimitRatio:         cfg.SpeedLimitRatio,
+		WheelCircumferenceCM:    cfg.WheelCircumferenceCM,
+		MaxPhaseCurrentMA:       cfg.MaxPhaseCurrentMA,
+		StartupPhaseCurrentMA:   cfg.StartupPhaseCurrentMA,
+		EBSVoltageMV:            cfg.EBSVoltageMV,
+		EBSCurrentMA:            cfg.EBSCurrentMA,
+	}
+
+	if ecuConfig != app.lastECUConfig {
+		if err := app.ipcTx.SendECUConfig(ecuConfig); err != nil {
+			app.log.Error("Failed to send ECU config: %v", err)
+		} else {
+			app.lastECUConfig = ecuConfig
 		}
 	}
 

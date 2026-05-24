@@ -11,13 +11,19 @@ import (
 
 const (
 	// Bosch ECU CAN IDs - Status messages (0x7xx)
-	BoschStatus1FrameID   = 0x7E0 // Voltage, current, RPM, speed, throttle
-	BoschStatus2FrameID   = 0x7E1 // Temperature, fault code
-	BoschStatus3FrameID   = 0x7E2 // Odometer
-	BoschStatus4FrameID   = 0x7E3 // KERS status
-	BoschGearFrameID      = 0x7E4 // Current gear
-	BoschEBSStatusFrameID = 0x7E5 // Regenerative braking status
-	BoschStatus5FrameID   = 0x7E8 // Firmware version
+	BoschStatus1FrameID             = 0x7E0 // Voltage, current, RPM, speed, throttle
+	BoschStatus2FrameID             = 0x7E1 // Temperature, fault code
+	BoschStatus3FrameID             = 0x7E2 // Odometer
+	BoschStatus4FrameID             = 0x7E3 // Bit-packed status flags
+	BoschGearFrameID                = 0x7E4 // Current gear + per-gear ratios
+	BoschEBSStatusFrameID           = 0x7E5 // Regenerative braking settings
+	BoschStatus5FrameID             = 0x7E8 // Motor power / max speed / SW version
+	BoschMaxVoltageFrameID          = 0x7E9 // Over-voltage threshold (10 mV units)
+	BoschMinVoltageFrameID          = 0x7EA // Under-voltage threshold (10 mV units)
+	BoschSpeedLimitFrameID          = 0x7EB // Speed limit (%)
+	BoschWheelCircumferenceFrameID  = 0x7EC // Wheel circumference (cm)
+	BoschMaxPhaseCurrentFrameID     = 0x7EE // Max phase current (10 mA units)
+	BoschStartupPhaseCurrentFrameID = 0x7EF // Startup phase current (10 mA units)
 
 	// Bosch ECU CAN IDs - Control messages (0x4xx)
 	BoschControlMessageID     = 0x4E0 // Gear/boost/KERS control
@@ -56,12 +62,38 @@ type BoschECU struct {
 	acceptedRegenCurrent int    // EBS regen current limit the ECU accepted, in mA (0x7E5 echo)
 	acceptedRegenVoltage int    // EBS regen voltage cap the ECU accepted, in mV (0x7E5 echo)
 	boostEnabled         bool   // commanded boost (drives the control frame)
-	boostReported        bool   // boost state the ECU acknowledges in status4
 	throttleOn           bool
 	brakeOn              bool
 
 	energyConsumedFrac  float64 // sub-mWh remainder carried across frames
 	energyRecoveredFrac float64
+
+	// Status bits reported by the ECU (paired enable/disable flags)
+	ecuStatusEnabled bool
+	boostActive      bool
+	gearModeEnabled  bool
+
+	// Per-gear current and torque ratios (0-100 %)
+	gearRatioHighCurrent uint8
+	gearRatioMidCurrent  uint8
+	gearRatioLowCurrent  uint8
+	gearRatioHighTorque  uint8
+	gearRatioMidTorque   uint8
+	gearRatioLowTorque   uint8
+
+	// Decoded software-version components
+	motorRatedPowerKW uint8 // Motor rated power in kW
+	motorMaxSpeedKMH  uint8 // Motor max speed in km/h
+	swBaseVersion     uint8 // Base SW version byte (high nibble.low nibble)
+	swAppVersion      uint8 // Application SW version byte (high nibble.low nibble)
+
+	// Reported ECU configuration values
+	ovThresholdMV         uint32 // Over-voltage cut-off threshold in mV
+	uvThresholdMV         uint32 // Under-voltage cut-off threshold in mV
+	speedLimitRatio       uint8  // Speed limit as a percentage
+	wheelCircumferenceCM  uint8  // Wheel circumference in cm
+	maxPhaseCurrentMA     uint32 // Maximum phase current in mA
+	startupPhaseCurrentMA uint32 // Startup phase current in mA
 }
 
 func NewBoschECU() ECUInterface {
@@ -103,6 +135,18 @@ func (b *BoschECU) HandleFrame(frame can.Frame) error {
 		return b.handleEBSStatusFrame(frame)
 	case BoschStatus5FrameID:
 		return b.handleStatus5Frame(frame)
+	case BoschMaxVoltageFrameID:
+		return b.handleMaxVoltageFrame(frame)
+	case BoschMinVoltageFrameID:
+		return b.handleMinVoltageFrame(frame)
+	case BoschSpeedLimitFrameID:
+		return b.handleSpeedLimitFrame(frame)
+	case BoschWheelCircumferenceFrameID:
+		return b.handleWheelCircumferenceFrame(frame)
+	case BoschMaxPhaseCurrentFrameID:
+		return b.handleMaxPhaseCurrentFrame(frame)
+	case BoschStartupPhaseCurrentFrameID:
+		return b.handleStartupPhaseCurrentFrame(frame)
 	}
 
 	return nil
@@ -195,8 +239,9 @@ func (b *BoschECU) handleStatus2Frame(frame can.Frame) error {
 	// Temperature
 	b.temperature = int8(frame.Data[0])
 
-	// Fault code - filter out fault code 15 which is spurious
-	// when software brake is applied in parking mode
+	// Fault code 15 = "braking indication": the ECU reports it whenever the
+	// brake input is active. Suppress it here so brake-on doesn't surface as
+	// a fault — the actual brake state is already exposed via brakeOn.
 	faultCode := binary.BigEndian.Uint32(frame.Data[2:6])
 	if faultCode == 15 {
 		faultCode = 0
@@ -228,10 +273,35 @@ func (b *BoschECU) handleStatus4Frame(frame can.Frame) error {
 		return nil
 	}
 
-	// KERS status (ebs_enabled, bit 6) and boost status (boost_mode_enabled,
-	// bit 2) as acknowledged by the ECU.
-	b.kersEnabled = (frame.Data[0] & 0x40) != 0
-	b.boostReported = (frame.Data[0] & 0x04) != 0
+	// Byte 0 is a bit-packed status register with paired enable/disable
+	// flags. The "enable" bit going high marks the feature as on; the
+	// "disable" bit going high marks it off. We treat the disable bit as
+	// authoritative when set, otherwise track the enable bit.
+	byte0 := frame.Data[0]
+
+	if byte0&0x02 != 0 { // bit 1: ECU disabled
+		b.ecuStatusEnabled = false
+	} else if byte0&0x01 != 0 { // bit 0: ECU enabled
+		b.ecuStatusEnabled = true
+	}
+
+	if byte0&0x08 != 0 { // bit 3: boost disabled
+		b.boostActive = false
+	} else if byte0&0x04 != 0 { // bit 2: boost enabled
+		b.boostActive = true
+	}
+
+	if byte0&0x20 != 0 { // bit 5: gear mode disabled
+		b.gearModeEnabled = false
+	} else if byte0&0x10 != 0 { // bit 4: gear mode enabled
+		b.gearModeEnabled = true
+	}
+
+	if byte0&0x80 != 0 { // bit 7: KERS/EBS disabled
+		b.kersEnabled = false
+	} else if byte0&0x40 != 0 { // bit 6: KERS/EBS enabled
+		b.kersEnabled = true
+	}
 
 	return nil
 }
@@ -244,6 +314,18 @@ func (b *BoschECU) handleGearFrame(frame can.Frame) error {
 
 	// Gear number (1-3)
 	b.gear = frame.Data[0]
+
+	// Bytes 1-6 carry per-gear current/torque ratios (0-100 %). The full
+	// frame is 7 bytes; short frames just leave the ratios as-is.
+	if frame.Length >= 7 {
+		b.gearRatioHighCurrent = frame.Data[1]
+		b.gearRatioMidCurrent = frame.Data[2]
+		b.gearRatioLowCurrent = frame.Data[3]
+		b.gearRatioHighTorque = frame.Data[4]
+		b.gearRatioMidTorque = frame.Data[5]
+		b.gearRatioLowTorque = frame.Data[6]
+	}
+
 	b.logger.Debug("ECU gear: %d", b.gear)
 
 	return nil
@@ -277,13 +359,102 @@ func (b *BoschECU) handleStatus5Frame(frame can.Frame) error {
 	}
 
 	// Status5 layout (8 bytes, big-endian):
-	//   [0:4] warranty_date
-	//   [4:8] software_version
+	//   [0:4] reserved (historically warranty_date)
+	//   [4]   motor rated power (BCD, kW)
+	//   [5]   motor max speed   (BCD, km/h)
+	//   [6]   base SW version   (BCD, high.low nibbles)
+	//   [7]   app SW version    (BCD, high.low nibbles)
 	b.warrantyDate = binary.BigEndian.Uint32(frame.Data[0:4])
 	b.firmwareVersion = binary.BigEndian.Uint32(frame.Data[4:8])
-	b.logger.Debug("ECU firmware version: 0x%08X (warranty: 0x%08X)", b.firmwareVersion, b.warrantyDate)
+
+	b.motorRatedPowerKW = bcdByteToDecimal(frame.Data[4])
+	b.motorMaxSpeedKMH = bcdByteToDecimal(frame.Data[5])
+	b.swBaseVersion = frame.Data[6]
+	b.swAppVersion = frame.Data[7]
+
+	b.logger.Debug("ECU firmware: %dkW / %dkm/h / base=%s / app=%s",
+		b.motorRatedPowerKW, b.motorMaxSpeedKMH,
+		formatBCDVersion(b.swBaseVersion), formatBCDVersion(b.swAppVersion))
 
 	return nil
+}
+
+func (b *BoschECU) handleMaxVoltageFrame(frame can.Frame) error {
+	if frame.Length < 2 {
+		b.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 2", frame.ID, frame.Length)
+		return nil
+	}
+	b.ovThresholdMV = uint32(binary.BigEndian.Uint16(frame.Data[0:2])) * 10
+	b.logger.Debug("ECU over-voltage threshold: %d mV", b.ovThresholdMV)
+	return nil
+}
+
+func (b *BoschECU) handleMinVoltageFrame(frame can.Frame) error {
+	if frame.Length < 2 {
+		b.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 2", frame.ID, frame.Length)
+		return nil
+	}
+	b.uvThresholdMV = uint32(binary.BigEndian.Uint16(frame.Data[0:2])) * 10
+	b.logger.Debug("ECU under-voltage threshold: %d mV", b.uvThresholdMV)
+	return nil
+}
+
+func (b *BoschECU) handleSpeedLimitFrame(frame can.Frame) error {
+	if frame.Length < 1 {
+		b.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 1", frame.ID, frame.Length)
+		return nil
+	}
+	b.speedLimitRatio = frame.Data[0]
+	b.logger.Debug("ECU speed limit ratio: %d %%", b.speedLimitRatio)
+	return nil
+}
+
+func (b *BoschECU) handleWheelCircumferenceFrame(frame can.Frame) error {
+	if frame.Length < 1 {
+		b.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 1", frame.ID, frame.Length)
+		return nil
+	}
+	b.wheelCircumferenceCM = frame.Data[0]
+	b.logger.Debug("ECU wheel circumference: %d cm", b.wheelCircumferenceCM)
+	return nil
+}
+
+func (b *BoschECU) handleMaxPhaseCurrentFrame(frame can.Frame) error {
+	if frame.Length < 2 {
+		b.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 2", frame.ID, frame.Length)
+		return nil
+	}
+	b.maxPhaseCurrentMA = uint32(binary.BigEndian.Uint16(frame.Data[0:2])) * 10
+	b.logger.Debug("ECU max phase current: %d mA", b.maxPhaseCurrentMA)
+	return nil
+}
+
+func (b *BoschECU) handleStartupPhaseCurrentFrame(frame can.Frame) error {
+	if frame.Length < 2 {
+		b.logger.Warn("Short CAN frame 0x%X: got %d bytes, need 2", frame.ID, frame.Length)
+		return nil
+	}
+	b.startupPhaseCurrentMA = uint32(binary.BigEndian.Uint16(frame.Data[0:2])) * 10
+	b.logger.Debug("ECU startup phase current: %d mA", b.startupPhaseCurrentMA)
+	return nil
+}
+
+// bcdByteToDecimal converts a two-digit BCD byte to its decimal value.
+// 0x45 -> 45. Falls back to the raw value if either nibble is out of BCD range.
+func bcdByteToDecimal(b byte) uint8 {
+	high := b >> 4
+	low := b & 0x0F
+	if high > 9 || low > 9 {
+		return b
+	}
+	return high*10 + low
+}
+
+// formatBCDVersion renders a BCD-style version byte as "<hi>.<lo>", using
+// hex digits so non-decimal nibbles survive the round-trip (some firmwares
+// leak hex into the low nibble once the BCD digit space is exhausted).
+func formatBCDVersion(b byte) string {
+	return fmt.Sprintf("%X.%X", b>>4, b&0x0F)
 }
 
 func (b *BoschECU) SetKersEnabled(enabled bool) error {
@@ -327,7 +498,7 @@ func (b *BoschECU) SetBoostEnabled(enabled bool) error {
 func (b *BoschECU) GetBoostEnabled() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.boostReported
+	return b.boostActive
 }
 
 // GetInstantPower returns instantaneous power in mW from this ECU's own voltage
@@ -497,6 +668,63 @@ func (b *BoschECU) GetWarrantyDate() uint32 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.warrantyDate
+}
+
+func (b *BoschECU) GetECUStatusEnabled() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.ecuStatusEnabled
+}
+
+func (b *BoschECU) GetBoostActive() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.boostActive
+}
+
+func (b *BoschECU) GetGearModeEnabled() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.gearModeEnabled
+}
+
+func (b *BoschECU) GetGearRatios() GearRatios {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return GearRatios{
+		HighCurrent: b.gearRatioHighCurrent,
+		MidCurrent:  b.gearRatioMidCurrent,
+		LowCurrent:  b.gearRatioLowCurrent,
+		HighTorque:  b.gearRatioHighTorque,
+		MidTorque:   b.gearRatioMidTorque,
+		LowTorque:   b.gearRatioLowTorque,
+	}
+}
+
+func (b *BoschECU) GetSoftwareVersion() SoftwareVersion {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return SoftwareVersion{
+		MotorRatedPowerKW: b.motorRatedPowerKW,
+		MotorMaxSpeedKMH:  b.motorMaxSpeedKMH,
+		BaseVersion:       formatBCDVersion(b.swBaseVersion),
+		AppVersion:        formatBCDVersion(b.swAppVersion),
+	}
+}
+
+func (b *BoschECU) GetConfigReport() ConfigReport {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return ConfigReport{
+		OverVoltageThresholdMV:  b.ovThresholdMV,
+		UnderVoltageThresholdMV: b.uvThresholdMV,
+		SpeedLimitRatio:         b.speedLimitRatio,
+		WheelCircumferenceCM:    b.wheelCircumferenceCM,
+		MaxPhaseCurrentMA:       b.maxPhaseCurrentMA,
+		StartupPhaseCurrentMA:   b.startupPhaseCurrentMA,
+		EBSVoltageMV:            uint32(b.acceptedRegenVoltage),
+		EBSCurrentMA:            uint32(b.acceptedRegenCurrent),
+	}
 }
 
 func (b *BoschECU) GetBrakeOn() bool {

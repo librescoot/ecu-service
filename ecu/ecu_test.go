@@ -352,6 +352,42 @@ func TestBoschStatus4_KERS(t *testing.T) {
 	}
 }
 
+func TestBoschStatus4_AllBits(t *testing.T) {
+	// 0x9A = 0b10011010: bit1 (ECU disabled), bit3 (boost disabled),
+	// bit4 (gear mode enabled), bit7 (KERS disabled).
+	b := newTestBoschECU()
+	err := b.HandleFrame(makeCANFrame(BoschStatus4FrameID, []byte{0x9A}))
+	if err != nil {
+		t.Fatalf("HandleFrame error: %v", err)
+	}
+
+	if b.GetECUStatusEnabled() {
+		t.Error("ECU should be reported disabled")
+	}
+	if b.GetBoostActive() {
+		t.Error("boost should be reported disabled")
+	}
+	if !b.GetGearModeEnabled() {
+		t.Error("gear mode should be reported enabled")
+	}
+	if b.GetKersEnabled() {
+		t.Error("KERS should be reported disabled")
+	}
+}
+
+func TestBoschStatus4_DisableBitWins(t *testing.T) {
+	// Both bits set in a pair: the disable bit must take precedence so
+	// we never falsely report a feature as on.
+	b := newTestBoschECU()
+	err := b.HandleFrame(makeCANFrame(BoschStatus4FrameID, []byte{0x03})) // ECU enabled + disabled
+	if err != nil {
+		t.Fatalf("HandleFrame error: %v", err)
+	}
+	if b.GetECUStatusEnabled() {
+		t.Error("disable bit should win over enable bit")
+	}
+}
+
 func TestBoschGear(t *testing.T) {
 	b := newTestBoschECU()
 	data := []byte{2}
@@ -363,6 +399,23 @@ func TestBoschGear(t *testing.T) {
 
 	if b.GetGear() != 2 {
 		t.Errorf("gear: expected 2, got %d", b.GetGear())
+	}
+}
+
+func TestBoschGear_WithRatios(t *testing.T) {
+	b := newTestBoschECU()
+	// gear=1, then high/mid/low current ratios, high/mid/low torque ratios
+	data := []byte{1, 100, 75, 50, 90, 65, 40}
+
+	err := b.HandleFrame(makeCANFrame(BoschGearFrameID, data))
+	if err != nil {
+		t.Fatalf("HandleFrame error: %v", err)
+	}
+
+	r := b.GetGearRatios()
+	want := GearRatios{HighCurrent: 100, MidCurrent: 75, LowCurrent: 50, HighTorque: 90, MidTorque: 65, LowTorque: 40}
+	if r != want {
+		t.Errorf("ratios: expected %+v, got %+v", want, r)
 	}
 }
 
@@ -394,6 +447,90 @@ func TestBoschStatus5_ShortFrame(t *testing.T) {
 
 	if b.GetFirmwareVersion() != 0 {
 		t.Errorf("firmware should be 0 after short frame, got 0x%X", b.GetFirmwareVersion())
+	}
+}
+
+func TestBoschStatus5_SoftwareVersion(t *testing.T) {
+	b := newTestBoschECU()
+	// reserved=0, motor=4kW (0x04), max=45km/h (0x45), base=v4.0 (0x40), app=v0.C (0x0C)
+	data := []byte{0x00, 0x00, 0x00, 0x00, 0x04, 0x45, 0x40, 0x0C}
+
+	err := b.HandleFrame(makeCANFrame(BoschStatus5FrameID, data))
+	if err != nil {
+		t.Fatalf("HandleFrame error: %v", err)
+	}
+
+	sw := b.GetSoftwareVersion()
+	want := SoftwareVersion{MotorRatedPowerKW: 4, MotorMaxSpeedKMH: 45, BaseVersion: "4.0", AppVersion: "0.C"}
+	if sw != want {
+		t.Errorf("software version: expected %+v, got %+v", want, sw)
+	}
+}
+
+func TestBCDByteToDecimal(t *testing.T) {
+	tests := []struct {
+		in   byte
+		want uint8
+	}{
+		{0x04, 4},
+		{0x45, 45},
+		{0x99, 99},
+		{0x00, 0},
+		{0xAB, 0xAB}, // non-BCD digits: passthrough
+	}
+	for _, tt := range tests {
+		if got := bcdByteToDecimal(tt.in); got != tt.want {
+			t.Errorf("bcdByteToDecimal(0x%02X): expected %d, got %d", tt.in, tt.want, got)
+		}
+	}
+}
+
+func TestBoschConfigFrames(t *testing.T) {
+	b := newTestBoschECU()
+
+	// 0x7E9 over-voltage threshold: 0x1B75 * 10 = 70290 mV
+	b.HandleFrame(makeCANFrame(BoschMaxVoltageFrameID, []byte{0x1B, 0x75}))
+	// 0x7EA under-voltage threshold: 0x0F99 * 10 = 39930 mV
+	b.HandleFrame(makeCANFrame(BoschMinVoltageFrameID, []byte{0x0F, 0x99}))
+	// 0x7EB speed limit: 100 %
+	b.HandleFrame(makeCANFrame(BoschSpeedLimitFrameID, []byte{0x64}))
+	// 0x7EC wheel circumference: 126 cm
+	b.HandleFrame(makeCANFrame(BoschWheelCircumferenceFrameID, []byte{0x7E}))
+	// 0x7EE max phase current: 0x5208 * 10 = 210000 mA
+	b.HandleFrame(makeCANFrame(BoschMaxPhaseCurrentFrameID, []byte{0x52, 0x08}))
+	// 0x7EF startup phase current: 0x03E8 * 10 = 10000 mA
+	b.HandleFrame(makeCANFrame(BoschStartupPhaseCurrentFrameID, []byte{0x03, 0xE8}))
+
+	got := b.GetConfigReport()
+	want := ConfigReport{
+		OverVoltageThresholdMV:  70290,
+		UnderVoltageThresholdMV: 39930,
+		SpeedLimitRatio:         100,
+		WheelCircumferenceCM:    126,
+		MaxPhaseCurrentMA:       210000,
+		StartupPhaseCurrentMA:   10000,
+	}
+	if got != want {
+		t.Errorf("config report: expected %+v, got %+v", want, got)
+	}
+}
+
+func TestBoschEBSStatus_MirrorsSettings(t *testing.T) {
+	b := newTestBoschECU()
+	// 56 V / 10 A in 10-unit increments
+	data := []byte{0x15, 0xE0, 0x03, 0xE8}
+
+	err := b.HandleFrame(makeCANFrame(BoschEBSStatusFrameID, data))
+	if err != nil {
+		t.Fatalf("HandleFrame error: %v", err)
+	}
+
+	cfg := b.GetConfigReport()
+	if cfg.EBSVoltageMV != 56000 {
+		t.Errorf("EBS voltage: expected 56000, got %d", cfg.EBSVoltageMV)
+	}
+	if cfg.EBSCurrentMA != 10000 {
+		t.Errorf("EBS current: expected 10000, got %d", cfg.EBSCurrentMA)
 	}
 }
 

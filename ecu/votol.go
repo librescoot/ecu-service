@@ -336,6 +336,36 @@ func (v *VotolECU) GetBrakeOn() bool {
 	return false
 }
 
+// GetECUStatusEnabled is not reported by the Votol ECU.
+func (v *VotolECU) GetECUStatusEnabled() bool {
+	return false
+}
+
+// GetBoostActive is not reported by the Votol ECU.
+func (v *VotolECU) GetBoostActive() bool {
+	return false
+}
+
+// GetGearModeEnabled is not reported by the Votol ECU.
+func (v *VotolECU) GetGearModeEnabled() bool {
+	return false
+}
+
+// GetGearRatios is not reported by the Votol ECU.
+func (v *VotolECU) GetGearRatios() GearRatios {
+	return GearRatios{}
+}
+
+// GetSoftwareVersion is not reported by the Votol ECU.
+func (v *VotolECU) GetSoftwareVersion() SoftwareVersion {
+	return SoftwareVersion{}
+}
+
+// GetConfigReport is not reported by the Votol ECU.
+func (v *VotolECU) GetConfigReport() ConfigReport {
+	return ConfigReport{}
+}
+
 // RequestStatusUpdate is a no-op for Votol ECU as it sends status frames continuously
 // Unlike Bosch, there's no request mechanism - faults clear automatically when status frames arrive
 func (v *VotolECU) RequestStatusUpdate() error {

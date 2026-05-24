@@ -25,13 +25,40 @@ type RedisStatus3 struct {
 }
 
 type RedisStatus4 struct {
-	KersOn  bool
-	BoostOn bool
+	KersOn          bool
+	BoostOn         bool
+	EcuEnabled      bool
+	BoostActive     bool
+	GearModeEnabled bool
 }
 
 type RedisStatus5 struct {
-	FirmwareVersion uint32
-	Gear            uint8
+	FirmwareVersion   uint32
+	Gear              uint8
+	MotorRatedPowerKW uint8
+	MotorMaxSpeedKMH  uint8
+	SWBaseVersion     string
+	SWAppVersion      string
+	HighGearCurrent   uint8
+	MidGearCurrent    uint8
+	LowGearCurrent    uint8
+	HighGearTorque    uint8
+	MidGearTorque     uint8
+	LowGearTorque     uint8
+}
+
+// RedisECUConfig carries the ECU configuration values broadcast at boot
+// or in response to a status request (0x4EF). Values are 0 until the ECU
+// reports them.
+type RedisECUConfig struct {
+	OverVoltageThresholdMV  uint32
+	UnderVoltageThresholdMV uint32
+	SpeedLimitRatio         uint8
+	WheelCircumferenceCM    uint8
+	MaxPhaseCurrentMA       uint32
+	StartupPhaseCurrentMA   uint32
+	EBSVoltageMV            uint32
+	EBSCurrentMA            uint32
 }
 
 // EBS regen caps the ECU accepted (CAN 0x7E5 echo), distinct from the

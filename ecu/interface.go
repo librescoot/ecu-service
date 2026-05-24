@@ -23,6 +23,34 @@ type ECUConfig struct {
 	ECUType   ECUType
 }
 
+// GearRatios are the per-gear current and torque scaling factors (0-100%)
+// reported by the ECU.
+type GearRatios struct {
+	HighCurrent, MidCurrent, LowCurrent uint8
+	HighTorque, MidTorque, LowTorque    uint8
+}
+
+// SoftwareVersion is the decoded firmware identification block.
+type SoftwareVersion struct {
+	MotorRatedPowerKW uint8  // Motor rated power in kW
+	MotorMaxSpeedKMH  uint8  // Motor max speed in km/h
+	BaseVersion       string // e.g. "4.0"
+	AppVersion        string // e.g. "0.C"
+}
+
+// ConfigReport captures the ECU's operating configuration as broadcast at
+// boot or in response to a status request.
+type ConfigReport struct {
+	OverVoltageThresholdMV  uint32 // Battery voltage at which ECU cuts output
+	UnderVoltageThresholdMV uint32 // Battery voltage at which ECU stops
+	SpeedLimitRatio         uint8  // Speed limit (%)
+	WheelCircumferenceCM    uint8  // Wheel circumference (cm)
+	MaxPhaseCurrentMA       uint32 // Peak phase current (mA)
+	StartupPhaseCurrentMA   uint32 // Startup phase current (mA)
+	EBSVoltageMV            uint32 // Regen target voltage (mV)
+	EBSCurrentMA            uint32 // Regen target current (mA)
+}
+
 // ECUInterface defines the interface that all ECU implementations must satisfy
 type ECUInterface interface {
 	// Initialize sets up the ECU module
@@ -107,6 +135,26 @@ type ECUInterface interface {
 
 	// GetBrakeOn returns true if the brake is currently active
 	GetBrakeOn() bool
+
+	// GetECUStatusEnabled returns the ECU's reported enable/disable status.
+	GetECUStatusEnabled() bool
+
+	// GetBoostActive returns the ECU's reported boost-mode status (independent
+	// of the locally requested setting accessible via GetBoostEnabled).
+	GetBoostActive() bool
+
+	// GetGearModeEnabled returns the ECU's reported gear-mode status.
+	GetGearModeEnabled() bool
+
+	// GetGearRatios returns the per-gear current and torque ratios.
+	GetGearRatios() GearRatios
+
+	// GetSoftwareVersion returns the decoded firmware identification block.
+	GetSoftwareVersion() SoftwareVersion
+
+	// GetConfigReport returns the ECU configuration report (thresholds,
+	// limits, wheel circumference, phase-current settings).
+	GetConfigReport() ConfigReport
 
 	// IsDataStale returns true if no data has been received recently
 	IsDataStale() bool

@@ -116,9 +116,13 @@ func (tx *IPCTx) SendStatus4(data RedisStatus4) error {
 
 	pipe := tx.redis.Pipeline()
 
+	enabledStr := map[bool]string{true: "enabled", false: "disabled"}
 	pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
-		"kers":  map[bool]string{true: "on", false: "off"}[data.KersOn],
-		"boost": map[bool]string{true: "on", false: "off"}[data.BoostOn],
+		"kers":            map[bool]string{true: "on", false: "off"}[data.KersOn],
+		"boost":           map[bool]string{true: "on", false: "off"}[data.BoostOn],
+		"ecu-status":      enabledStr[data.EcuEnabled],
+		"boost-status":    enabledStr[data.BoostActive],
+		"gear-mode":       enabledStr[data.GearModeEnabled],
 	})
 
 	// Also publish KERS state changes
@@ -161,13 +165,59 @@ func (tx *IPCTx) SendStatus5(data RedisStatus5) error {
 		"gear": data.Gear,
 	}
 
-	// Only set firmware version if non-zero (avoids overwriting with 0 on startup)
+	// Only set firmware fields if non-zero (avoids overwriting with 0 on startup)
 	if data.FirmwareVersion != 0 {
 		fields["fw-version"] = fmt.Sprintf("%08X", data.FirmwareVersion)
+		fields["motor:rated-power-kw"] = data.MotorRatedPowerKW
+		fields["motor:max-speed-kmh"] = data.MotorMaxSpeedKMH
+		fields["fw:base-version"] = data.SWBaseVersion
+		fields["fw:app-version"] = data.SWAppVersion
+	}
+
+	// Per-gear ratios are only meaningful once seen. Publishing zeros at
+	// boot would overwrite previously-cached values; skip the whole block
+	// when nothing has been reported yet.
+	if data.HighGearCurrent != 0 || data.MidGearCurrent != 0 || data.LowGearCurrent != 0 ||
+		data.HighGearTorque != 0 || data.MidGearTorque != 0 || data.LowGearTorque != 0 {
+		fields["gear:high-current-ratio"] = data.HighGearCurrent
+		fields["gear:mid-current-ratio"] = data.MidGearCurrent
+		fields["gear:low-current-ratio"] = data.LowGearCurrent
+		fields["gear:high-torque-ratio"] = data.HighGearTorque
+		fields["gear:mid-torque-ratio"] = data.MidGearTorque
+		fields["gear:low-torque-ratio"] = data.LowGearTorque
 	}
 
 	if err := tx.redis.HSet(tx.ctx, "engine-ecu", fields).Err(); err != nil {
 		return fmt.Errorf("failed to send Status5: %v", err)
+	}
+
+	return nil
+}
+
+// SendECUConfig publishes the ECU's reported configuration values. Fields
+// stay at 0 until the ECU broadcasts them (at boot, or in response to a
+// status request), so we skip the write entirely while nothing is known.
+func (tx *IPCTx) SendECUConfig(data RedisECUConfig) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	if data == (RedisECUConfig{}) {
+		return nil
+	}
+
+	fields := map[string]interface{}{
+		"config:ov-threshold-mv":       data.OverVoltageThresholdMV,
+		"config:uv-threshold-mv":       data.UnderVoltageThresholdMV,
+		"config:speed-limit-ratio":     data.SpeedLimitRatio,
+		"config:wheel-circumference-cm": data.WheelCircumferenceCM,
+		"config:max-phase-current-ma":  data.MaxPhaseCurrentMA,
+		"config:startup-phase-current-ma": data.StartupPhaseCurrentMA,
+		"config:ebs-voltage-mv":        data.EBSVoltageMV,
+		"config:ebs-current-ma":        data.EBSCurrentMA,
+	}
+
+	if err := tx.redis.HSet(tx.ctx, "engine-ecu", fields).Err(); err != nil {
+		return fmt.Errorf("failed to send ECU config: %v", err)
 	}
 
 	return nil
