@@ -110,6 +110,13 @@ func (app *EngineApp) writeDefaultRedisState() {
 		app.log.Error("Failed to send default Status4: %v", err)
 	}
 
+	// Publish a zero-valued config so any stale config:* fields left
+	// behind by a previous service instance get HDEL'd. Real values
+	// reappear as soon as the ECU broadcasts them.
+	if err := app.ipcTx.SendECUConfig(RedisECUConfig{}); err != nil {
+		app.log.Error("Failed to send default ECU config: %v", err)
+	}
+
 	app.log.Debug("Default Redis state written")
 }
 

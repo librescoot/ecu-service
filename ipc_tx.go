@@ -194,29 +194,67 @@ func (tx *IPCTx) SendStatus5(data RedisStatus5) error {
 	return nil
 }
 
-// SendECUConfig publishes the ECU's reported configuration values. Fields
-// stay at 0 until the ECU broadcasts them (at boot, or in response to a
-// status request), so we skip the write entirely while nothing is known.
+// SendECUConfig publishes the ECU's reported configuration values.
+// Each group of fields corresponds to a single CAN frame (or pair of
+// frames that arrive together). When a group has not been seen — its
+// canonical value is still zero — the fields are HDEL'd so callers
+// can distinguish "not reported" from a real zero reading.
 func (tx *IPCTx) SendECUConfig(data RedisECUConfig) error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 
-	if data == (RedisECUConfig{}) {
-		return nil
+	pipe := tx.redis.Pipeline()
+
+	// 0x7E9 + 0x7EA: over- and under-voltage thresholds arrive together
+	// in the 0x4EF settings burst.
+	voltageKeys := []string{"config:ov-threshold-mv", "config:uv-threshold-mv"}
+	if data.OverVoltageThresholdMV != 0 {
+		pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
+			"config:ov-threshold-mv": data.OverVoltageThresholdMV,
+			"config:uv-threshold-mv": data.UnderVoltageThresholdMV,
+		})
+	} else {
+		pipe.HDel(tx.ctx, "engine-ecu", voltageKeys...)
 	}
 
-	fields := map[string]interface{}{
-		"config:ov-threshold-mv":       data.OverVoltageThresholdMV,
-		"config:uv-threshold-mv":       data.UnderVoltageThresholdMV,
-		"config:speed-limit-ratio":     data.SpeedLimitRatio,
-		"config:wheel-circumference-cm": data.WheelCircumferenceCM,
-		"config:max-phase-current-ma":  data.MaxPhaseCurrentMA,
-		"config:startup-phase-current-ma": data.StartupPhaseCurrentMA,
-		"config:ebs-voltage-mv":        data.EBSVoltageMV,
-		"config:ebs-current-ma":        data.EBSCurrentMA,
+	// 0x7EB: speed limit ratio
+	if data.SpeedLimitRatio != 0 {
+		pipe.HSet(tx.ctx, "engine-ecu", "config:speed-limit-ratio", data.SpeedLimitRatio)
+	} else {
+		pipe.HDel(tx.ctx, "engine-ecu", "config:speed-limit-ratio")
 	}
 
-	if err := tx.redis.HSet(tx.ctx, "engine-ecu", fields).Err(); err != nil {
+	// 0x7EC: wheel circumference
+	if data.WheelCircumferenceCM != 0 {
+		pipe.HSet(tx.ctx, "engine-ecu", "config:wheel-circumference-cm", data.WheelCircumferenceCM)
+	} else {
+		pipe.HDel(tx.ctx, "engine-ecu", "config:wheel-circumference-cm")
+	}
+
+	// 0x7EE + 0x7EF: max and startup phase currents
+	phaseKeys := []string{"config:max-phase-current-ma", "config:startup-phase-current-ma"}
+	if data.MaxPhaseCurrentMA != 0 {
+		pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
+			"config:max-phase-current-ma":     data.MaxPhaseCurrentMA,
+			"config:startup-phase-current-ma": data.StartupPhaseCurrentMA,
+		})
+	} else {
+		pipe.HDel(tx.ctx, "engine-ecu", phaseKeys...)
+	}
+
+	// 0x7E5: EBS voltage and current — broadcast continuously while the
+	// ECU is up, so under normal operation this branch always HSETs.
+	ebsKeys := []string{"config:ebs-voltage-mv", "config:ebs-current-ma"}
+	if data.EBSVoltageMV != 0 {
+		pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
+			"config:ebs-voltage-mv": data.EBSVoltageMV,
+			"config:ebs-current-ma": data.EBSCurrentMA,
+		})
+	} else {
+		pipe.HDel(tx.ctx, "engine-ecu", ebsKeys...)
+	}
+
+	if _, err := pipe.Exec(tx.ctx); err != nil {
 		return fmt.Errorf("failed to send ECU config: %v", err)
 	}
 
