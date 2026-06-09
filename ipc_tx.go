@@ -13,6 +13,9 @@ type IPCTx struct {
 	redis *redis.Client
 	mu    sync.Mutex
 	ctx   context.Context
+
+	throttleKnown  bool // whether lastThrottleOn has been set yet
+	lastThrottleOn bool // last published throttle state (guarded by mu)
 }
 
 func NewIPCTx(logger *LeveledLogger, redis *redis.Client) *IPCTx {
@@ -49,9 +52,15 @@ func (tx *IPCTx) SendStatus1(data RedisStatus1) error {
 		return fmt.Errorf("failed to send Status1: %v", err)
 	}
 
-	// Publish throttle state changes
-	if err := tx.redis.Publish(tx.ctx, "engine-ecu", "throttle").Err(); err != nil {
-		return fmt.Errorf("failed to publish throttle state: %v", err)
+	// Publish a throttle notification only when the state changes; Status1 is
+	// sent on every frame (speed/current jitter), so an unconditional publish
+	// would notify at frame rate.
+	if !tx.throttleKnown || data.ThrottleOn != tx.lastThrottleOn {
+		tx.throttleKnown = true
+		tx.lastThrottleOn = data.ThrottleOn
+		if err := tx.redis.Publish(tx.ctx, "engine-ecu", "throttle").Err(); err != nil {
+			return fmt.Errorf("failed to publish throttle state: %v", err)
+		}
 	}
 
 	return nil
