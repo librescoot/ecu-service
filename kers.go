@@ -97,13 +97,6 @@ func (k *KERS) enableDisableKers(enable bool) {
 }
 
 func (k *KERS) updateKers() {
-	// If KERS is disabled via settings, force it off unconditionally
-	if k.settingsDisabled {
-		k.log.Debug("updateKers: KERS disabled by settings -> forcing off")
-		k.enableDisableKers(false)
-		return
-	}
-
 	switch k.temperatureState {
 	case BatteryTemperatureStateCold:
 		k.kersReasonOff = KersReasonOffCold
@@ -131,7 +124,11 @@ func (k *KERS) updateKers() {
 		}
 
 		if k.vehicleState == VehicleStateEngineReady {
-			k.enableDisableKers(k.kersReasonOff == KersReasonOffNone)
+			// Enable only when the battery temperature allows it and the user
+			// hasn't disabled KERS via settings. Both gates only take effect
+			// while stopped, so a settings toggle mid-ride applies at the next
+			// stop rather than changing regen feel while moving.
+			k.enableDisableKers(!k.settingsDisabled && k.kersReasonOff == KersReasonOffNone)
 		} else {
 			k.log.Debug("ECU not enabled. Not setting KERS (yet).")
 		}
