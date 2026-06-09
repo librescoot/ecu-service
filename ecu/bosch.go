@@ -57,6 +57,9 @@ type BoschECU struct {
 	boostReported   bool   // boost state the ECU acknowledges in status4
 	throttleOn      bool
 	brakeOn         bool
+
+	energyConsumedFrac  float64 // sub-mWh remainder carried across frames
+	energyRecoveredFrac float64
 }
 
 func NewBoschECU() ECUInterface {
@@ -165,11 +168,19 @@ func (b *BoschECU) updatePower() {
 	// Integrate power over time: Energy (mWh) = Power (mW) × time (hours)
 	deltaEnergy := float64(powerMW) * dtSeconds / 3600.0
 
-	// Separate consumed vs recovered energy
+	// Separate consumed vs recovered energy. Carry the sub-mWh remainder
+	// across frames so the per-frame truncation doesn't systematically
+	// undercount (at ~10 Hz, up to ~1 mWh/frame would otherwise be dropped).
 	if deltaEnergy > 0 {
-		b.energyConsumed += uint64(deltaEnergy)
+		b.energyConsumedFrac += deltaEnergy
+		whole := uint64(b.energyConsumedFrac)
+		b.energyConsumed += whole
+		b.energyConsumedFrac -= float64(whole)
 	} else {
-		b.energyRecovered += uint64(-deltaEnergy)
+		b.energyRecoveredFrac += -deltaEnergy
+		whole := uint64(b.energyRecoveredFrac)
+		b.energyRecovered += whole
+		b.energyRecoveredFrac -= float64(whole)
 	}
 }
 
