@@ -3,6 +3,7 @@ package ecu
 import (
 	"context"
 	"github.com/brutella/can"
+	"math"
 	"sync"
 	"time"
 )
@@ -126,7 +127,7 @@ func (b *BaseECU) calculateSpeed(rawSpeed uint16) uint16 {
 	}
 
 	avgSpeed := b.speedBuffer.MovingAverage(rawSpeed)
-	return uint16(avgSpeed * CalibrationFactor * SpeedToleranceFactor)
+	return uint16(math.Round(avgSpeed * CalibrationFactor * SpeedToleranceFactor))
 }
 
 // packFrame creates a CAN frame with the given ID and data

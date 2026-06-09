@@ -112,8 +112,8 @@ func TestCalculateSpeed_ZeroResetsBuffer(t *testing.T) {
 	b.calculateSpeed(0) // resets buffer
 	speed := b.calculateSpeed(50)
 	// After reset, buffer has only one value (50)
-	// 50 * 1.03 * 1.155556 = ~59.5
-	expected := uint16(59)
+	// 50 * 1.03 * 1.155556 = ~59.5, rounds to nearest -> 60
+	expected := uint16(60)
 	if speed != expected {
 		t.Errorf("expected %d, got %d", expected, speed)
 	}
