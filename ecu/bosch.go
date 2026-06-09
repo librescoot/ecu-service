@@ -53,7 +53,8 @@ type BoschECU struct {
 	kersEnabled     bool
 	kersCurrent     uint16 // KERS current in mA
 	kersVoltage     uint16 // KERS voltage in mV
-	boostEnabled    bool
+	boostEnabled    bool   // commanded boost (drives the control frame)
+	boostReported   bool   // boost state the ECU acknowledges in status4
 	throttleOn      bool
 	brakeOn         bool
 }
@@ -214,8 +215,10 @@ func (b *BoschECU) handleStatus4Frame(frame can.Frame) error {
 		return nil
 	}
 
-	// KERS status
+	// KERS status (ebs_enabled, bit 6) and boost status (boost_mode_enabled,
+	// bit 2) as acknowledged by the ECU.
 	b.kersEnabled = (frame.Data[0] & 0x40) != 0
+	b.boostReported = (frame.Data[0] & 0x04) != 0
 
 	return nil
 }
@@ -305,7 +308,7 @@ func (b *BoschECU) SetBoostEnabled(enabled bool) error {
 func (b *BoschECU) GetBoostEnabled() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.boostEnabled
+	return b.boostReported
 }
 
 // sendControlMessage sends the control frame 0x4E0 with current gear/boost/KERS state
