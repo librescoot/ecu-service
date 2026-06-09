@@ -311,6 +311,16 @@ func (b *BoschECU) GetBoostEnabled() bool {
 	return b.boostReported
 }
 
+// GetInstantPower returns instantaneous power in mW from this ECU's own voltage
+// and current. The embedded BaseECU.GetInstantPower reads lastVoltage/
+// lastCurrent, which this ECU never populates (it keeps its own voltage/
+// current fields), so without this override the power hash field stays 0.
+func (b *BoschECU) GetInstantPower() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return int(int64(b.voltage) * int64(b.current) / 1000)
+}
+
 // sendControlMessage sends the control frame 0x4E0 with current gear/boost/KERS state
 func (b *BoschECU) sendControlMessage(kersEnabled, boostEnabled bool) error {
 	b.logger.Info("Setting Bosch ECU control: boost=%v, gear=%v, kers=%v",
