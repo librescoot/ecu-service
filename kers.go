@@ -186,18 +186,17 @@ func (k *KERS) HandleVehicleStateChange(state VehicleState) {
 	k.engineOnTimer.Stop()
 
 	if stateChanged && state == VehicleStateEngineReady {
+		// Defer both the engine-ready state and the KERS write to the timer to
+		// give the ECU ~1.5s to fully initialize after engine-on before we
+		// send it config. The timer callback sets the state and calls updateKers.
 		k.log.Info("Ready to drive -> awaiting 'Engine ON' ... (%.1f s)",
 			KersEngineOnDelayS.Seconds())
-		k.vehicleState = state // EXPLICITLY set the new state
 		k.engineOnTimer.Reset(KersEngineOnDelayS)
 	} else {
-		k.vehicleState = state // Always set the state
+		k.vehicleState = state
 	}
 
 	k.log.Debug("HandleVehicleStateChange AFTER - current state: %v", k.vehicleState)
-
-	// Force an update of KERS state
-	k.updateKers()
 }
 
 func (k *KERS) UpdateVehicleStopped(stopped bool) {
