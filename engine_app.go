@@ -400,8 +400,11 @@ func (app *EngineApp) handleFaultState(activeFaults map[ecu.ECUFault]bool) {
 		app.log.Info("Fault cleared, stopping recovery timers")
 		app.stopFaultRecoveryTimers()
 	} else if hasFault {
-		// Fault still present - refresh the update timer (but not the clear timer)
-		app.refreshFaultUpdateTimer()
+		// Fault still present - refresh both timers so they fire only after
+		// fault packets stop arriving. Refreshing the clear timer too keeps it
+		// from force-clearing an active fault every FaultClearTimeout, which the
+		// next fault frame would re-raise (flapping the fault set and stream).
+		app.startFaultRecoveryTimers()
 	}
 
 	app.hasFault = hasFault
@@ -429,20 +432,6 @@ func (app *EngineApp) startFaultRecoveryTimers() {
 		app.diag.SetFaults(make(map[ecu.ECUFault]bool))
 		app.hasFault = false
 	})
-}
-
-// refreshFaultUpdateTimer resets the update timer while fault is still present
-// This ensures we request status update shortly after fault packets stop arriving
-func (app *EngineApp) refreshFaultUpdateTimer() {
-	if app.faultUpdateTimer != nil {
-		app.faultUpdateTimer.Stop()
-		app.faultUpdateTimer = time.AfterFunc(FaultUpdateDelay, func() {
-			app.log.Info("Fault update timer expired, requesting ECU status")
-			if err := app.ecu.RequestStatusUpdate(); err != nil {
-				app.log.Error("Failed to request ECU status: %v", err)
-			}
-		})
-	}
 }
 
 // stopFaultRecoveryTimers stops both fault recovery timers
