@@ -253,6 +253,13 @@ func (h *frameHandler) Handle(frame can.Frame) {
 
 	// Update Redis with latest ECU state
 	h.app.updateRedisState()
+
+	// On a fresh KERS status frame, reconcile the ECU's reported state: if it
+	// re-enabled regen while a reason-off (hot/cold battery) is in effect,
+	// re-send the disable.
+	if frame.ID == ecu.BoschStatus4FrameID {
+		h.app.kers.UpdateECUKers(h.app.ecu.GetKersEnabled())
+	}
 }
 
 // Update Redis with current ECU state
