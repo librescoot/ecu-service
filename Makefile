@@ -1,33 +1,33 @@
-.PHONY: build clean build-arm build-host dist fmt deps lint test
-
-BINARY_NAME=ecu-service
-BUILD_DIR=bin
-VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-LDFLAGS=-ldflags "-w -s -X main.version=$(VERSION) -extldflags '-static'"
+BINARY_NAME := ecu-service
+BUILD_DIR   := bin
+VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+LDFLAGS     := -ldflags "-w -s -X main.version=$(VERSION)"
 
 build:
 	mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) .
-
-clean:
-	rm -rf $(BUILD_DIR)
+	GOTOOLCHAIN=go1.25.7 CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) .
 
 build-arm: build
 
 build-host:
 	mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-host .
+	GOTOOLCHAIN=go1.25.7 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) .
 
 dist: build
 
+test:
+	GOTOOLCHAIN=go1.25.7 go test ./...
+
 lint:
 	golangci-lint run
-
-test:
-	go test -v ./...
 
 fmt:
 	go fmt ./...
 
 deps:
-	go mod download && go mod tidy
+	GOTOOLCHAIN=go1.25.7 go mod download && go mod tidy
+
+clean:
+	rm -rf $(BUILD_DIR)
+
+.PHONY: build build-arm build-host dist test lint fmt deps clean

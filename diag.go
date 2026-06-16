@@ -3,137 +3,128 @@ package main
 import (
 	"context"
 	"sync"
-
-	"ecu-service/ecu"
-
-	"github.com/go-redis/redis/v8"
+	"time"
 )
 
 const (
-	diagGroupName           = "engine-ecu"
-	diagFaultSetKey         = "engine-ecu:fault"
-	diagEventStream         = "events:faults"
-	diagEventStreamMaxLen   = 1000
-	diagNotificationChannel = "engine-ecu"
+	faultUpdateDelay  = 500 * time.Millisecond
+	faultClearTimeout = 5 * time.Second
 )
 
-type Diag struct {
-	log         *LeveledLogger
-	redis       *redis.Client
-	mu          sync.RWMutex
-	faultStates map[ecu.ECUFault]bool
-	ctx         context.Context
+// Diagnostics tracks the active fault from the ECU and applies hysteresis:
+//   - New fault: reported after 500ms of stability (debounce transients).
+//   - Fault clear: reported only after 5s of continuous FaultNone (prevents flapping).
+type Diagnostics struct {
+	mu            sync.Mutex
+	currentFault  Fault // committed to Redis
+	pendingFault  Fault // currently being reported by ECU
+	updateTimer   *time.Timer
+	clearTimer    *time.Timer
+	onFaultChange func(fault Fault, cfg FaultConfig)
+	log           *Logger
 }
 
-func NewDiag(logger *LeveledLogger, redis *redis.Client) *Diag {
-	return &Diag{
-		log:         logger,
-		redis:       redis,
-		faultStates: make(map[ecu.ECUFault]bool),
-		ctx:         context.Background(),
+func newDiagnostics(ctx context.Context, log *Logger, onFaultChange func(Fault, FaultConfig)) *Diagnostics {
+	d := &Diagnostics{
+		log:           log,
+		onFaultChange: onFaultChange,
+	}
+	d.updateTimer = time.NewTimer(faultUpdateDelay)
+	d.updateTimer.Stop()
+	d.clearTimer = time.NewTimer(faultClearTimeout)
+	d.clearTimer.Stop()
+
+	go d.timerLoop(ctx)
+	return d
+}
+
+func (d *Diagnostics) timerLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case <-d.updateTimer.C:
+			d.mu.Lock()
+			f := d.pendingFault
+			if f != FaultNone && f != d.currentFault {
+				d.currentFault = f
+				cfg := faultConfigs[f]
+				d.mu.Unlock()
+				d.log.Warn("Fault committed: code=%d (%s)", f, cfg.Description)
+				d.onFaultChange(f, cfg)
+			} else {
+				d.mu.Unlock()
+			}
+
+		case <-d.clearTimer.C:
+			d.mu.Lock()
+			if d.pendingFault == FaultNone && d.currentFault != FaultNone {
+				d.currentFault = FaultNone
+				d.mu.Unlock()
+				d.log.Info("Fault cleared")
+				d.onFaultChange(FaultNone, FaultConfig{})
+			} else {
+				d.mu.Unlock()
+			}
+		}
 	}
 }
 
-func (d *Diag) Destroy() {}
+// Update is called on every Status2 frame with the raw fault code from the ECU.
+func (d *Diagnostics) Update(code uint32) {
+	fault, _ := MapFault(code)
 
-func (d *Diag) SetFaultPresence(fault ecu.ECUFault, present bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if fault == ecu.FaultNone {
+	if fault == d.currentFault {
+		// Fault state unchanged. If the fault is active and a clear countdown
+		// is running (briefly got FaultNone earlier), cancel it.
+		if fault != FaultNone {
+			if !d.clearTimer.Stop() {
+				select {
+				case <-d.clearTimer.C:
+				default:
+				}
+			}
+			d.clearTimer.Reset(faultClearTimeout)
+		}
 		return
 	}
 
-	wasPresent := d.faultStates[fault]
-	if wasPresent == present {
-		return
-	}
+	// Fault differs from what we've committed.
+	d.pendingFault = fault
 
-	d.faultStates[fault] = present
-
-	config, ok := ecu.GetFaultConfig(fault)
-	if !ok {
-		d.log.Warn("Unknown fault code: %d", fault)
-		return
-	}
-
-	if present {
-		d.log.Warn("Fault set: code=%d, description=%s", fault, config.Description)
-		d.reportFaultPresent(fault, config)
+	if fault == FaultNone {
+		// Fault disappeared — wait 5s before clearing.
+		if !d.updateTimer.Stop() {
+			select {
+			case <-d.updateTimer.C:
+			default:
+			}
+		}
+		if !d.clearTimer.Stop() {
+			select {
+			case <-d.clearTimer.C:
+			default:
+			}
+		}
+		d.clearTimer.Reset(faultClearTimeout)
 	} else {
-		d.log.Info("Fault cleared: code=%d, description=%s", fault, config.Description)
-		d.reportFaultAbsent(fault)
-	}
-}
-
-func (d *Diag) SetFaults(faults map[ecu.ECUFault]bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	for fault := ecu.ECUFault(1); fault <= ecu.FaultInternal15vAbnormal; fault++ {
-		newPresent := faults[fault]
-		wasPresent := d.faultStates[fault]
-
-		if newPresent == wasPresent {
-			continue
+		// New fault — commit after 500ms of stability.
+		if !d.clearTimer.Stop() {
+			select {
+			case <-d.clearTimer.C:
+			default:
+			}
 		}
-
-		d.faultStates[fault] = newPresent
-
-		config, ok := ecu.GetFaultConfig(fault)
-		if !ok {
-			continue
+		if !d.updateTimer.Stop() {
+			select {
+			case <-d.updateTimer.C:
+			default:
+			}
 		}
-
-		if newPresent {
-			d.log.Warn("Fault set: code=%d, description=%s", fault, config.Description)
-			d.reportFaultPresent(fault, config)
-		} else {
-			d.log.Info("Fault cleared: code=%d, description=%s", fault, config.Description)
-			d.reportFaultAbsent(fault)
-		}
-	}
-}
-
-func (d *Diag) reportFaultPresent(fault ecu.ECUFault, config ecu.FaultConfig) {
-	pipe := d.redis.Pipeline()
-
-	pipe.SAdd(d.ctx, diagFaultSetKey, uint32(fault))
-
-	pipe.XAdd(d.ctx, &redis.XAddArgs{
-		Stream: diagEventStream,
-		MaxLen: diagEventStreamMaxLen,
-		Values: map[string]interface{}{
-			"group":       diagGroupName,
-			"code":        uint32(fault),
-			"description": config.Description,
-		},
-	})
-
-	pipe.Publish(d.ctx, diagNotificationChannel, "fault")
-
-	if _, err := pipe.Exec(d.ctx); err != nil {
-		d.log.Error("Failed to report fault present: %v", err)
-	}
-}
-
-func (d *Diag) reportFaultAbsent(fault ecu.ECUFault) {
-	pipe := d.redis.Pipeline()
-
-	pipe.SRem(d.ctx, diagFaultSetKey, uint32(fault))
-
-	pipe.XAdd(d.ctx, &redis.XAddArgs{
-		Stream: diagEventStream,
-		MaxLen: diagEventStreamMaxLen,
-		Values: map[string]interface{}{
-			"group": diagGroupName,
-			"code":  -int32(fault),
-		},
-	})
-
-	pipe.Publish(d.ctx, diagNotificationChannel, "fault")
-
-	if _, err := pipe.Exec(d.ctx); err != nil {
-		d.log.Error("Failed to report fault absent: %v", err)
+		d.updateTimer.Reset(faultUpdateDelay)
 	}
 }
