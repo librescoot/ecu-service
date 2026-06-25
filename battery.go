@@ -1,102 +1,80 @@
 package main
 
-import (
-	"sync"
-)
+import "sync"
 
-const BatteryCount = 2
-
-type BatteryTemperatureState int
+type TempState int
 
 const (
-	BatteryTemperatureStateUnknown BatteryTemperatureState = iota
-	BatteryTemperatureStateCold
-	BatteryTemperatureStateHot
-	BatteryTemperatureStateIdeal
+	TempUnknown TempState = iota
+	TempCold
+	TempHot
+	TempIdeal
 )
 
-type BatteryState struct {
-	Active           bool
-	TemperatureState BatteryTemperatureState
-}
-
-type Battery struct {
-	log         *LeveledLogger
-	batteryData [BatteryCount]BatteryState
-	mu          sync.RWMutex
-}
-
-func NewBattery(logger *LeveledLogger) *Battery {
-	return &Battery{
-		log: logger,
+func parseTempState(s string) TempState {
+	switch s {
+	case "cold":
+		return TempCold
+	case "hot":
+		return TempHot
+	case "ideal":
+		return TempIdeal
+	default:
+		return TempUnknown
 	}
 }
 
-func (b *Battery) Destroy() {}
+type batteryState struct {
+	active    bool
+	tempState TempState
+}
 
-func (b *Battery) Update(idx uint, data BatteryState) {
+type BatteryTracker struct {
+	mu     sync.Mutex
+	states [2]batteryState
+}
+
+// SetState updates the state for battery at index idx (0 or 1).
+func (b *BatteryTracker) SetState(idx int, active bool, temp TempState) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.states[idx] = batteryState{active: active, tempState: temp}
+}
+
+// DualActive reports whether two or more batteries are active, which selects
+// the dual-battery KERS current.
+func (b *BatteryTracker) DualActive() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for _, s := range b.states {
+		if s.active {
+			n++
+		}
+	}
+	return n >= 2
+}
+
+// ActiveTempState returns the conservative superset of all active batteries'
+// temperature states. TempIdeal is returned only if every active battery is
+// ideal; any non-ideal state takes precedence. Returns TempUnknown if no
+// battery is active.
+func (b *BatteryTracker) ActiveTempState() TempState {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.log.Debug("Updating battery %d with state: active=%v, temperature_state=%v", idx, data.Active, data.TemperatureState)
-
-	if idx >= BatteryCount {
-		b.log.Error("Invalid battery index: %d (num batteries: %d)", idx, BatteryCount)
-		return
-	}
-
-	b.batteryData[idx] = data
-}
-
-func (b *Battery) GetActiveTemperatureState() BatteryTemperatureState {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	b.log.Debug("GetActiveTemperatureState called")
-	b.log.Debug("Battery 0 state: active=%v, temperature_state=%v", b.batteryData[0].Active, b.batteryData[0].TemperatureState)
-	b.log.Debug("Battery 1 state: active=%v, temperature_state=%v", b.batteryData[1].Active, b.batteryData[1].TemperatureState)
-
-	b0 := b.batteryData[0]
-	b1 := b.batteryData[1]
-
-	if b0.Active && !b1.Active {
-		return b0.TemperatureState
-	}
-
-	if b1.Active && !b0.Active {
-		return b1.TemperatureState
-	}
-
-	// Both active: return the most restrictive state (lowest enum value).
-	// Enum order: Unknown(0) < Cold(1) < Hot(2) < Ideal(3)
-	if b0.Active && b1.Active {
-		if b0.TemperatureState < b1.TemperatureState {
-			return b0.TemperatureState
+	result := TempUnknown
+	anyActive := false
+	for _, s := range b.states {
+		if !s.active {
+			continue
 		}
-		return b1.TemperatureState
+		if !anyActive {
+			anyActive = true
+			result = s.tempState
+		} else if s.tempState != TempIdeal {
+			result = s.tempState
+		}
 	}
-
-	// Neither active
-	return BatteryTemperatureStateUnknown
-}
-
-func (b *Battery) BothActive() bool {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.batteryData[0].Active && b.batteryData[1].Active
-}
-
-func (b *Battery) stringifyTemperatureState(state BatteryTemperatureState) string {
-	switch state {
-	case BatteryTemperatureStateCold:
-		return "cold"
-	case BatteryTemperatureStateHot:
-		return "hot"
-	case BatteryTemperatureStateIdeal:
-		return "ideal"
-	case BatteryTemperatureStateUnknown:
-		fallthrough
-	default:
-		return "unknown"
-	}
+	return result
 }
