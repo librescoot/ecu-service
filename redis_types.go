@@ -33,3 +33,10 @@ type RedisStatus5 struct {
 	FirmwareVersion uint32
 	Gear            uint8
 }
+
+// EBS regen values the ECU reports actually applying (CAN 0x7E5), distinct
+// from the commanded kers-power / kers-voltage setpoints.
+type RedisEBS struct {
+	AppliedVoltage int // mV
+	AppliedCurrent int // mA
+}

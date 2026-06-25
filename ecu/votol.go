@@ -209,6 +209,10 @@ func (v *VotolECU) GetCurrent() int {
 	return v.current
 }
 
+// Votol does not report EBS regen voltage/current.
+func (v *VotolECU) GetAppliedRegenVoltage() int { return 0 }
+func (v *VotolECU) GetAppliedRegenCurrent() int { return 0 }
+
 func (v *VotolECU) GetOdometer() uint32 {
 	v.mu.RLock()
 	defer v.mu.RUnlock()

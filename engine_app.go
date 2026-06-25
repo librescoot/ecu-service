@@ -42,6 +42,7 @@ type EngineApp struct {
 	lastStatus3 RedisStatus3
 	lastStatus4 RedisStatus4
 	lastStatus5 RedisStatus5
+	lastEBS     RedisEBS
 
 	// Fault recovery timers
 	faultUpdateTimer *time.Timer // Timer to request ECU status after fault
@@ -345,6 +346,19 @@ func (app *EngineApp) updateRedisState() {
 			app.log.Error("Failed to send Status4: %v", err)
 		} else {
 			app.lastStatus4 = status4
+		}
+	}
+
+	ebs := RedisEBS{
+		AppliedVoltage: app.ecu.GetAppliedRegenVoltage(),
+		AppliedCurrent: app.ecu.GetAppliedRegenCurrent(),
+	}
+
+	if ebs != app.lastEBS {
+		if err := app.ipcTx.SendEBS(ebs); err != nil {
+			app.log.Error("Failed to send EBS status: %v", err)
+		} else {
+			app.lastEBS = ebs
 		}
 	}
 

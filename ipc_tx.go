@@ -132,6 +132,24 @@ func (tx *IPCTx) SendStatus4(data RedisStatus4) error {
 	return nil
 }
 
+func (tx *IPCTx) SendEBS(data RedisEBS) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	pipe := tx.redis.Pipeline()
+	pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
+		"kers-applied-voltage": data.AppliedVoltage,
+		"kers-applied-current": data.AppliedCurrent,
+	})
+	pipe.Publish(tx.ctx, "engine-ecu", "kers-applied-current")
+
+	if _, err := pipe.Exec(tx.ctx); err != nil {
+		return fmt.Errorf("failed to send EBS status: %v", err)
+	}
+
+	return nil
+}
+
 func (tx *IPCTx) SendStatus5(data RedisStatus5) error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()

@@ -64,6 +64,14 @@ type ECUInterface interface {
 	// GetCurrent returns the current motor current in mA
 	GetCurrent() int
 
+	// GetAppliedRegenVoltage returns the EBS regen voltage the ECU reports
+	// applying in mV (0 if the ECU type does not report it)
+	GetAppliedRegenVoltage() int
+
+	// GetAppliedRegenCurrent returns the EBS regen current the ECU reports
+	// applying in mA (0 if the ECU type does not report it)
+	GetAppliedRegenCurrent() int
+
 	// GetOdometer returns the total distance in meters
 	GetOdometer() uint32
 

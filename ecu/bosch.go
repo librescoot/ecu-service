@@ -51,8 +51,10 @@ type BoschECU struct {
 	firmwareVersion uint32 // ECU firmware version
 	warrantyDate    uint32 // ECU warranty date
 	kersEnabled     bool
-	kersCurrent     uint16 // KERS current in mA
-	kersVoltage     uint16 // KERS voltage in mV
+	kersCurrent     uint16 // KERS current in mA (commanded setpoint)
+	kersVoltage     uint16 // KERS voltage in mV (commanded setpoint)
+	appliedRegenCurrent int  // EBS regen current the ECU reports applying, in mA (0x7E5)
+	appliedRegenVoltage int  // EBS regen voltage the ECU reports applying, in mV (0x7E5)
 	boostEnabled    bool   // commanded boost (drives the control frame)
 	boostReported   bool   // boost state the ECU acknowledges in status4
 	throttleOn      bool
@@ -253,11 +255,16 @@ func (b *BoschECU) handleEBSStatusFrame(frame can.Frame) error {
 		return nil
 	}
 
-	// EBS (regenerative braking) voltage and current (10mV and 10mA units)
+	// EBS (regenerative braking) voltage and current (10mV and 10mA units).
+	// This is what the ECU reports actually applying, which can differ from
+	// the commanded setpoint (e.g. tapered toward zero as the pack fills).
 	ebsVoltage := binary.BigEndian.Uint16(frame.Data[0:2])
 	ebsCurrent := binary.BigEndian.Uint16(frame.Data[2:4])
 
-	b.logger.Debug("ECU EBS: voltage=%dmV, current=%dmA", ebsVoltage*10, ebsCurrent*10)
+	b.appliedRegenVoltage = int(ebsVoltage) * 10
+	b.appliedRegenCurrent = int(ebsCurrent) * 10
+
+	b.logger.Debug("ECU EBS: voltage=%dmV, current=%dmA", b.appliedRegenVoltage, b.appliedRegenCurrent)
 
 	return nil
 }
@@ -413,6 +420,18 @@ func (b *BoschECU) GetCurrent() int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.current
+}
+
+func (b *BoschECU) GetAppliedRegenVoltage() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.appliedRegenVoltage
+}
+
+func (b *BoschECU) GetAppliedRegenCurrent() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.appliedRegenCurrent
 }
 
 func (b *BoschECU) GetOdometer() uint32 {
