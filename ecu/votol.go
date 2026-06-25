@@ -209,9 +209,10 @@ func (v *VotolECU) GetCurrent() int {
 	return v.current
 }
 
-// Votol does not report EBS regen voltage/current.
-func (v *VotolECU) GetAppliedRegenVoltage() int { return 0 }
-func (v *VotolECU) GetAppliedRegenCurrent() int { return 0 }
+// Votol does not report EBS regen caps; the regen envelope degrades to
+// gating-only (motor:current remains the real-measurement source).
+func (v *VotolECU) GetAcceptedRegenVoltage() int { return 0 }
+func (v *VotolECU) GetAcceptedRegenCurrent() int { return 0 }
 
 func (v *VotolECU) GetOdometer() uint32 {
 	v.mu.RLock()

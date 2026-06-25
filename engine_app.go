@@ -349,9 +349,15 @@ func (app *EngineApp) updateRedisState() {
 		}
 	}
 
+	acceptedV := app.ecu.GetAcceptedRegenVoltage()
+	acceptedI := app.ecu.GetAcceptedRegenCurrent()
+	regen := computeRegen(app.ecu.GetKersEnabled(), app.kers.ReasonOff(), app.ecu.GetVoltage(), acceptedV, acceptedI)
 	ebs := RedisEBS{
-		AppliedVoltage: app.ecu.GetAppliedRegenVoltage(),
-		AppliedCurrent: app.ecu.GetAppliedRegenCurrent(),
+		AcceptedVoltage: acceptedV,
+		AcceptedCurrent: acceptedI,
+		RegenAvailable:  regen.Available,
+		RegenReason:     regen.Reason,
+		RegenExpected:   regen.ExpectedMA,
 	}
 
 	if ebs != app.lastEBS {

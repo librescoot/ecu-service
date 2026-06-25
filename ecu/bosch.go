@@ -39,26 +39,26 @@ type BoschECU struct {
 	BaseECU
 
 	// State
-	speed           uint16
-	rawSpeed        uint16 // Store raw speed before calibration
-	rpm             uint16
-	voltage         int
-	current         int
-	temperature     int8
-	odometer        uint32
-	faultCode       uint32
-	gear            uint8  // Current gear (1-3)
-	firmwareVersion uint32 // ECU firmware version
-	warrantyDate    uint32 // ECU warranty date
-	kersEnabled     bool
-	kersCurrent     uint16 // KERS current in mA (commanded setpoint)
-	kersVoltage     uint16 // KERS voltage in mV (commanded setpoint)
-	appliedRegenCurrent int  // EBS regen current the ECU reports applying, in mA (0x7E5)
-	appliedRegenVoltage int  // EBS regen voltage the ECU reports applying, in mV (0x7E5)
-	boostEnabled    bool   // commanded boost (drives the control frame)
-	boostReported   bool   // boost state the ECU acknowledges in status4
-	throttleOn      bool
-	brakeOn         bool
+	speed                uint16
+	rawSpeed             uint16 // Store raw speed before calibration
+	rpm                  uint16
+	voltage              int
+	current              int
+	temperature          int8
+	odometer             uint32
+	faultCode            uint32
+	gear                 uint8  // Current gear (1-3)
+	firmwareVersion      uint32 // ECU firmware version
+	warrantyDate         uint32 // ECU warranty date
+	kersEnabled          bool
+	kersCurrent          uint16 // KERS current in mA (commanded setpoint)
+	kersVoltage          uint16 // KERS voltage in mV (commanded setpoint)
+	acceptedRegenCurrent int    // EBS regen current limit the ECU accepted, in mA (0x7E5 echo)
+	acceptedRegenVoltage int    // EBS regen voltage cap the ECU accepted, in mV (0x7E5 echo)
+	boostEnabled         bool   // commanded boost (drives the control frame)
+	boostReported        bool   // boost state the ECU acknowledges in status4
+	throttleOn           bool
+	brakeOn              bool
 
 	energyConsumedFrac  float64 // sub-mWh remainder carried across frames
 	energyRecoveredFrac float64
@@ -256,15 +256,16 @@ func (b *BoschECU) handleEBSStatusFrame(frame can.Frame) error {
 	}
 
 	// EBS (regenerative braking) voltage and current (10mV and 10mA units).
-	// This is what the ECU reports actually applying, which can differ from
-	// the commanded setpoint (e.g. tapered toward zero as the pack fills).
+	// The EBS Status frame echoes the regen caps the ECU accepted after its
+	// own clamping of the EBS Set command. This is the stored config, not a
+	// live measurement.
 	ebsVoltage := binary.BigEndian.Uint16(frame.Data[0:2])
 	ebsCurrent := binary.BigEndian.Uint16(frame.Data[2:4])
 
-	b.appliedRegenVoltage = int(ebsVoltage) * 10
-	b.appliedRegenCurrent = int(ebsCurrent) * 10
+	b.acceptedRegenVoltage = int(ebsVoltage) * 10
+	b.acceptedRegenCurrent = int(ebsCurrent) * 10
 
-	b.logger.Debug("ECU EBS: voltage=%dmV, current=%dmA", b.appliedRegenVoltage, b.appliedRegenCurrent)
+	b.logger.Debug("ECU EBS: voltage=%dmV, current=%dmA", b.acceptedRegenVoltage, b.acceptedRegenCurrent)
 
 	return nil
 }
@@ -422,16 +423,16 @@ func (b *BoschECU) GetCurrent() int {
 	return b.current
 }
 
-func (b *BoschECU) GetAppliedRegenVoltage() int {
+func (b *BoschECU) GetAcceptedRegenVoltage() int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.appliedRegenVoltage
+	return b.acceptedRegenVoltage
 }
 
-func (b *BoschECU) GetAppliedRegenCurrent() int {
+func (b *BoschECU) GetAcceptedRegenCurrent() int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.appliedRegenCurrent
+	return b.acceptedRegenCurrent
 }
 
 func (b *BoschECU) GetOdometer() uint32 {

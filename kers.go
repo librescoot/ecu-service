@@ -226,6 +226,13 @@ func (k *KERS) UpdateECUKers(kersActive bool) {
 	}
 }
 
+// ReasonOff returns the current KERS arm reason ("none"/"cold"/"hot").
+func (k *KERS) ReasonOff() string {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	return k.stringifyKersReasonOff()
+}
+
 func (k *KERS) stringifyKersReasonOff() string {
 	switch k.kersReasonOff {
 	case KersReasonOffCold:

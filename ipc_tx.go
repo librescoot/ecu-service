@@ -138,10 +138,13 @@ func (tx *IPCTx) SendEBS(data RedisEBS) error {
 
 	pipe := tx.redis.Pipeline()
 	pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
-		"kers-applied-voltage": data.AppliedVoltage,
-		"kers-applied-current": data.AppliedCurrent,
+		"kers-accepted-voltage": data.AcceptedVoltage,
+		"kers-accepted-current": data.AcceptedCurrent,
+		"regen-available":       map[bool]string{true: "on", false: "off"}[data.RegenAvailable],
+		"regen-reason":          data.RegenReason,
+		"regen-expected":        data.RegenExpected,
 	})
-	pipe.Publish(tx.ctx, "engine-ecu", "kers-applied-current")
+	pipe.Publish(tx.ctx, "engine-ecu", "regen-available")
 
 	if _, err := pipe.Exec(tx.ctx); err != nil {
 		return fmt.Errorf("failed to send EBS status: %v", err)

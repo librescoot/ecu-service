@@ -34,9 +34,13 @@ type RedisStatus5 struct {
 	Gear            uint8
 }
 
-// EBS regen values the ECU reports actually applying (CAN 0x7E5), distinct
-// from the commanded kers-power / kers-voltage setpoints.
+// EBS regen caps the ECU accepted (CAN 0x7E5 echo), distinct from the
+// commanded kers-power / kers-voltage setpoints, plus the derived regen
+// availability view.
 type RedisEBS struct {
-	AppliedVoltage int // mV
-	AppliedCurrent int // mA
+	AcceptedVoltage int // mV
+	AcceptedCurrent int // mA
+	RegenAvailable  bool
+	RegenReason     string // none/cold/hot/off/full
+	RegenExpected   int    // mA
 }
