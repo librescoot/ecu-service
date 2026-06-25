@@ -84,25 +84,27 @@ type ECU struct {
 	log *Logger
 
 	// Status fields — all protected by mu.
-	voltage         int // mV
-	current         int // mA (negative = regen)
-	rpm             uint16
-	speed           uint16 // km/h, calibrated + averaged
-	rawSpeed        uint16 // km/h, straight from frame byte
-	throttleOn      bool
-	brakeOn         bool
-	temperature     int8
-	faultCode       uint32
-	odometer        uint32 // meters, calibrated
-	kersECU         bool   // KERS state as reported by ECU (Status4)
-	kersActive      bool   // KERS state as commanded by service
-	boostEnabled    bool   // commanded boost (drives the control frame)
-	boostReported   bool   // boost state the ECU acknowledges in Status4
-	kersCurrent     uint16 // KERS regen current in mA (EBS Set frame)
-	kersVoltage     uint16 // KERS regen voltage in mV (EBS Set frame)
-	gear            uint8
-	firmwareVersion uint32
-	warrantyDate    uint32
+	voltage             int // mV
+	current             int // mA (negative = regen)
+	rpm                 uint16
+	speed               uint16 // km/h, calibrated + averaged
+	rawSpeed            uint16 // km/h, straight from frame byte
+	throttleOn          bool
+	brakeOn             bool
+	temperature         int8
+	faultCode           uint32
+	odometer            uint32 // meters, calibrated
+	kersECU             bool   // KERS state as reported by ECU (Status4)
+	kersActive          bool   // KERS state as commanded by service
+	boostEnabled        bool   // commanded boost (drives the control frame)
+	boostReported       bool   // boost state the ECU acknowledges in Status4
+	kersCurrent         uint16 // KERS regen current in mA (EBS Set frame)
+	kersVoltage         uint16 // KERS regen voltage in mV (EBS Set frame)
+	appliedRegenVoltage int    // EBS regen voltage the ECU reports applying, in mV (EBS Status frame)
+	appliedRegenCurrent int    // EBS regen current the ECU reports applying, in mA (EBS Status frame)
+	gear                uint8
+	firmwareVersion     uint32
+	warrantyDate        uint32
 
 	// Energy accounting.
 	energyConsumed      uint64  // mWh consumed
@@ -220,7 +222,11 @@ func (b *ECU) handleEBSStatus(frame can.Frame) {
 	}
 	v := binary.BigEndian.Uint16(frame.Data[0:2])
 	c := binary.BigEndian.Uint16(frame.Data[2:4])
-	b.log.Debug("EBS status: voltage=%dmV current=%dmA", int(v)*10, int(c)*10)
+	// What the ECU reports actually applying, which can differ from the
+	// commanded setpoint (e.g. tapered toward zero as the pack fills).
+	b.appliedRegenVoltage = int(v) * 10
+	b.appliedRegenCurrent = int(c) * 10
+	b.log.Debug("EBS status: voltage=%dmV current=%dmA", b.appliedRegenVoltage, b.appliedRegenCurrent)
 }
 
 func (b *ECU) handleStatus5(frame can.Frame) {
@@ -403,6 +409,18 @@ func (b *ECU) Current() int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.current
+}
+
+func (b *ECU) AppliedRegenVoltage() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.appliedRegenVoltage
+}
+
+func (b *ECU) AppliedRegenCurrent() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.appliedRegenCurrent
 }
 func (b *ECU) RPM() uint16 {
 	b.mu.RLock()

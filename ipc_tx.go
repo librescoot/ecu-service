@@ -19,29 +19,32 @@ const (
 	odometerChannel = "engine-ecu odometer"
 	kersChannel     = "engine-ecu kers"
 	kersReasonChan  = "engine-ecu kers-reason-off"
+	kersAppliedChan = "engine-ecu kers-applied-current"
 )
 
 type Status struct {
-	Voltage         int
-	Current         int
-	RPM             uint16
-	Speed           uint16
-	RawSpeed        uint16
-	ThrottleOn      bool
-	BrakeOn         bool
-	Power           int
-	EnergyConsumed  uint64
-	EnergyRecovered uint64
-	Temperature     int8
-	FaultCode       uint32
-	FaultDesc       string
-	Odometer        uint32
-	KersActive      bool
-	BoostEnabled    bool
-	KersReasonOff   string
-	Gear            uint8
-	FirmwareVersion uint32
-	WarrantyDate    uint32
+	Voltage             int
+	Current             int
+	RPM                 uint16
+	Speed               uint16
+	RawSpeed            uint16
+	ThrottleOn          bool
+	BrakeOn             bool
+	Power               int
+	EnergyConsumed      uint64
+	EnergyRecovered     uint64
+	Temperature         int8
+	FaultCode           uint32
+	FaultDesc           string
+	Odometer            uint32
+	KersActive          bool
+	BoostEnabled        bool
+	KersReasonOff       string
+	AppliedRegenVoltage int // mV, EBS regen the ECU reports applying
+	AppliedRegenCurrent int // mA, EBS regen the ECU reports applying
+	Gear                uint8
+	FirmwareVersion     uint32
+	WarrantyDate        uint32
 }
 
 type IPCTx struct {
@@ -104,6 +107,8 @@ func (tx *IPCTx) SendStatus(s Status) error {
 	add("kers", onOff(s.KersActive), s.KersActive != l.KersActive)
 	add("boost", onOff(s.BoostEnabled), s.BoostEnabled != l.BoostEnabled)
 	add("kers-reason-off", s.KersReasonOff, s.KersReasonOff != l.KersReasonOff)
+	add("kers-applied-voltage", s.AppliedRegenVoltage, s.AppliedRegenVoltage != l.AppliedRegenVoltage)
+	add("kers-applied-current", s.AppliedRegenCurrent, s.AppliedRegenCurrent != l.AppliedRegenCurrent)
 	add("gear", s.Gear, s.Gear != l.Gear)
 	if s.FirmwareVersion != 0 && (first || s.FirmwareVersion != l.FirmwareVersion) {
 		fields["fw-version"] = fmt.Sprintf("%08X", s.FirmwareVersion)
@@ -144,6 +149,13 @@ func (tx *IPCTx) PublishKERS() error {
 // PublishKERSReasonOff notifies subscribers that the KERS-off reason changed.
 func (tx *IPCTx) PublishKERSReasonOff() error {
 	_, err := tx.client.Publish(kersReasonChan, "")
+	return err
+}
+
+// PublishKERSApplied notifies subscribers that the ECU's applied regen
+// voltage/current changed.
+func (tx *IPCTx) PublishKERSApplied() error {
+	_, err := tx.client.Publish(kersAppliedChan, "")
 	return err
 }
 
