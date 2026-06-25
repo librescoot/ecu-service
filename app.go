@@ -38,8 +38,8 @@ type App struct {
 	lastThrottle       bool
 	lastOdometer       uint32
 	lastKersReason     KERSReason
-	lastAppliedVoltage int
-	lastAppliedCurrent int
+	lastRegenAvailable bool
+	lastRegenReason    string
 }
 
 func NewApp(ctx context.Context, opts Options) (*App, error) {
@@ -215,32 +215,37 @@ func (h *appHandler) Handle(frame can.Frame) {
 
 func (a *App) onFrame() {
 	s := Status{
-		Voltage:             a.ecu.Voltage(),
-		Current:             a.ecu.Current(),
-		RPM:                 a.ecu.RPM(),
-		Speed:               a.ecu.Speed(),
-		RawSpeed:            a.ecu.RawSpeed(),
-		ThrottleOn:          a.ecu.ThrottleOn(),
-		BrakeOn:             a.ecu.BrakeOn(),
-		Power:               a.ecu.Power(),
-		EnergyConsumed:      a.ecu.EnergyConsumed(),
-		EnergyRecovered:     a.ecu.EnergyRecovered(),
-		Temperature:         a.ecu.Temperature(),
-		FaultCode:           a.ecu.FaultCode(),
-		Odometer:            a.ecu.Odometer(),
-		KersActive:          a.ecu.KersECUEnabled(), // publish ECU-reported KERS state (matches v1)
-		BoostEnabled:        a.ecu.BoostEnabled(),
-		KersReasonOff:       string(a.lastKersReason),
-		AppliedRegenVoltage: a.ecu.AppliedRegenVoltage(),
-		AppliedRegenCurrent: a.ecu.AppliedRegenCurrent(),
-		Gear:                a.ecu.Gear(),
-		FirmwareVersion:     a.ecu.FirmwareVersion(),
-		WarrantyDate:        a.ecu.WarrantyDate(),
+		Voltage:              a.ecu.Voltage(),
+		Current:              a.ecu.Current(),
+		RPM:                  a.ecu.RPM(),
+		Speed:                a.ecu.Speed(),
+		RawSpeed:             a.ecu.RawSpeed(),
+		ThrottleOn:           a.ecu.ThrottleOn(),
+		BrakeOn:              a.ecu.BrakeOn(),
+		Power:                a.ecu.Power(),
+		EnergyConsumed:       a.ecu.EnergyConsumed(),
+		EnergyRecovered:      a.ecu.EnergyRecovered(),
+		Temperature:          a.ecu.Temperature(),
+		FaultCode:            a.ecu.FaultCode(),
+		Odometer:             a.ecu.Odometer(),
+		KersActive:           a.ecu.KersECUEnabled(), // publish ECU-reported KERS state (matches v1)
+		BoostEnabled:         a.ecu.BoostEnabled(),
+		KersReasonOff:        string(a.lastKersReason),
+		AcceptedRegenVoltage: a.ecu.AcceptedRegenVoltage(),
+		AcceptedRegenCurrent: a.ecu.AcceptedRegenCurrent(),
+		Gear:                 a.ecu.Gear(),
+		FirmwareVersion:      a.ecu.FirmwareVersion(),
+		WarrantyDate:         a.ecu.WarrantyDate(),
 	}
 	if s.FaultCode != 0 {
 		_, cfg := MapFault(s.FaultCode)
 		s.FaultDesc = cfg.Description
 	}
+
+	regen := computeRegen(s.KersActive, a.lastKersReason, s.Voltage, s.AcceptedRegenVoltage, s.AcceptedRegenCurrent)
+	s.RegenAvailable = regen.Available
+	s.RegenReason = regen.Reason
+	s.RegenExpected = regen.ExpectedMA
 
 	if err := a.ipcTx.SendStatus(s); err != nil {
 		a.log.Error("SendStatus: %v", err)
@@ -258,11 +263,11 @@ func (a *App) onFrame() {
 			a.log.Error("PublishOdometer: %v", err)
 		}
 	}
-	if s.AppliedRegenVoltage != a.lastAppliedVoltage || s.AppliedRegenCurrent != a.lastAppliedCurrent {
-		a.lastAppliedVoltage = s.AppliedRegenVoltage
-		a.lastAppliedCurrent = s.AppliedRegenCurrent
-		if err := a.ipcTx.PublishKERSApplied(); err != nil {
-			a.log.Error("PublishKERSApplied: %v", err)
+	if s.RegenAvailable != a.lastRegenAvailable || s.RegenReason != a.lastRegenReason {
+		a.lastRegenAvailable = s.RegenAvailable
+		a.lastRegenReason = s.RegenReason
+		if err := a.ipcTx.PublishRegen(); err != nil {
+			a.log.Error("PublishRegen: %v", err)
 		}
 	}
 
