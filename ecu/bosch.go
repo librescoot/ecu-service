@@ -255,15 +255,15 @@ func (b *BoschECU) handleEBSStatusFrame(frame can.Frame) error {
 		return nil
 	}
 
-	// EBS (regenerative braking) voltage and current (10mV and 10mA units).
 	// The EBS Status frame echoes the regen caps the ECU accepted after its
 	// own clamping of the EBS Set command. This is the stored config, not a
-	// live measurement.
+	// live measurement. Empirically the echo fields are already in mV / mA
+	// (1 unit = 1 mV / 1 mA), unlike the EBS Set frame's 10 mV / 10 mA steps.
 	ebsVoltage := binary.BigEndian.Uint16(frame.Data[0:2])
 	ebsCurrent := binary.BigEndian.Uint16(frame.Data[2:4])
 
-	b.acceptedRegenVoltage = int(ebsVoltage) * 10
-	b.acceptedRegenCurrent = int(ebsCurrent) * 10
+	b.acceptedRegenVoltage = int(ebsVoltage)
+	b.acceptedRegenCurrent = int(ebsCurrent)
 
 	b.logger.Debug("ECU EBS: voltage=%dmV, current=%dmA", b.acceptedRegenVoltage, b.acceptedRegenCurrent)
 
