@@ -16,6 +16,8 @@ type IPCTx struct {
 
 	throttleKnown  bool // whether lastThrottleOn has been set yet
 	lastThrottleOn bool // last published throttle state (guarded by mu)
+
+	heartbeat uint64 // monotonic liveness counter, bumped on every Status1 frame (guarded by mu)
 }
 
 func NewIPCTx(logger *LeveledLogger, redis *redis.Client) *IPCTx {
@@ -34,6 +36,10 @@ func (tx *IPCTx) SendStatus1(data RedisStatus1) error {
 
 	pipe := tx.redis.Pipeline()
 
+	// Status1 is written on every frame, so heartbeat advances at frame rate.
+	// Consumers watch it to tell a frozen/stale speed from a legit constant one.
+	tx.heartbeat++
+
 	pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
 		"motor:voltage":    data.MotorVoltage,
 		"motor:current":    data.MotorCurrent,
@@ -45,6 +51,7 @@ func (tx *IPCTx) SendStatus1(data RedisStatus1) error {
 		"power":            data.Power,
 		"energy:consumed":  data.EnergyConsumed,
 		"energy:recovered": data.EnergyRecovered,
+		"heartbeat":        tx.heartbeat,
 	})
 
 	_, err := pipe.Exec(tx.ctx)
