@@ -224,11 +224,11 @@ func (b *ECU) handleEBSStatus(frame can.Frame) {
 	c := binary.BigEndian.Uint16(frame.Data[2:4])
 	// The EBS Status frame echoes the regen voltage/current cap the ECU
 	// accepted, after its own clamping of the EBS Set command. This is the
-	// stored config, not a live measurement. Empirically the echo fields are
-	// already in mV / mA (1 unit = 1 mV / 1 mA), unlike the EBS Set frame's
-	// 10 mV / 10 mA steps.
-	b.acceptedRegenVoltage = int(v)
-	b.acceptedRegenCurrent = int(c)
+	// stored config, not a live measurement. The echo uses the same
+	// 10 mV / 10 mA per-LSB steps as the EBS Set frame, so scale by 10 to get
+	// mV / mA.
+	b.acceptedRegenVoltage = int(v) * 10
+	b.acceptedRegenCurrent = int(c) * 10
 	b.log.Debug("EBS status: voltage=%dmV current=%dmA", b.acceptedRegenVoltage, b.acceptedRegenCurrent)
 }
 
