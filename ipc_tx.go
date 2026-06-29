@@ -4,18 +4,10 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	ipc "github.com/librescoot/redis-ipc"
 	"github.com/redis/go-redis/v9"
 )
-
-// heartbeatInterval bounds how often the engine-ecu[heartbeat] liveness counter
-// is flushed to Redis. SendStatus only writes changed fields and no-ops when
-// nothing changed, so without this a constant (or frozen) speed would produce no
-// writes at all. ~4 Hz lets a consumer detect staleness within its poll window
-// without writing on every CAN frame.
-const heartbeatInterval = 250 * time.Millisecond
 
 const (
 	ecuHashKey      = "engine-ecu"
@@ -71,11 +63,6 @@ type IPCTx struct {
 	// to avoid redundant Redis writes on every CAN frame.
 	last    Status
 	hasLast bool
-
-	// heartbeat is a monotonic liveness counter flushed to engine-ecu at most
-	// every heartbeatInterval; lastBeat tracks the last flush time.
-	heartbeat uint64
-	lastBeat  time.Time
 }
 
 func newIPCTx(ctx context.Context, client *ipc.Client, log *Logger) *IPCTx {
@@ -138,17 +125,6 @@ func (tx *IPCTx) SendStatus(s Status) error {
 
 	tx.last = s
 	tx.hasLast = true
-
-	// Flush a liveness beat at most every heartbeatInterval, regardless of
-	// whether any status field changed. This keeps the hash provably fresh so a
-	// frozen/stale speed is distinguishable from a legit constant one, without
-	// writing on every CAN frame.
-	now := time.Now()
-	if first || now.Sub(tx.lastBeat) >= heartbeatInterval {
-		tx.heartbeat++
-		fields["heartbeat"] = tx.heartbeat
-		tx.lastBeat = now
-	}
 
 	if len(fields) == 0 {
 		return nil
