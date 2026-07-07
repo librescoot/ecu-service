@@ -27,6 +27,7 @@ const (
 
 	// Bosch ECU CAN IDs - Control messages (0x4xx)
 	BoschControlMessageID     = 0x4E0 // Gear/boost/KERS control
+	BoschGearControlFrameID   = 0x4E1 // Set per-gear ratio
 	BoschEBSSetFrameID        = 0x4E2 // Set EBS voltage/current
 	BoschStatusRequestFrameID = 0x4EF // Request all ECU status messages
 
@@ -43,6 +44,9 @@ const (
 
 type BoschECU struct {
 	BaseECU
+
+	// Configuration
+	gearRatioValues []uint8 // Per-gear ratio values (1-3 entries) sent via 0x4E1
 
 	// State
 	speed                uint16
@@ -64,6 +68,7 @@ type BoschECU struct {
 	boostEnabled         bool   // commanded boost (drives the control frame)
 	throttleOn           bool
 	brakeOn              bool
+	gearsSentOnPower     bool // whether gearRatioValues have been sent since the ECU last powered on
 
 	energyConsumedFrac  float64 // sub-mWh remainder carried across frames
 	energyRecoveredFrac float64
@@ -109,8 +114,43 @@ func (b *BoschECU) Initialize(ctx context.Context, config ECUConfig) error {
 		return err
 	}
 
-	b.logger.Printf("Initialized Bosch ECU")
+	b.gearRatioValues = config.GearRatioValues
+
+	if len(b.gearRatioValues) > 0 {
+		b.logger.Printf("Initialized Bosch ECU with gear ratios: %v", b.gearRatioValues)
+	} else {
+		b.logger.Printf("Initialized Bosch ECU")
+	}
 	return nil
+}
+
+// SetGear sends the configured ratio for the given gear (1-based) to the ECU
+// via the 0x4E1 control message. Not called while handling an incoming CAN
+// frame — HandleFrame already holds b.mu, and this method takes it too.
+func (b *BoschECU) SetGear(gear uint8) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if len(b.gearRatioValues) == 0 {
+		return fmt.Errorf("no gear ratios configured")
+	}
+
+	if gear < 1 || gear > uint8(len(b.gearRatioValues)) {
+		return fmt.Errorf("invalid gear %d: must be between 1 and %d", gear, len(b.gearRatioValues))
+	}
+
+	ratio := b.gearRatioValues[gear-1]
+
+	b.logger.Debug("Setting Bosch ECU gear %d (ratio: %d)", gear, ratio)
+
+	gearFrame := can.Frame{
+		ID:     BoschGearControlFrameID,
+		Length: 1,
+		Data:   [8]byte{},
+	}
+	gearFrame.Data[0] = ratio
+
+	return b.bus.Publish(gearFrame)
 }
 
 func (b *BoschECU) HandleFrame(frame can.Frame) error {
@@ -181,6 +221,27 @@ func (b *BoschECU) handleStatus1Frame(frame can.Frame) error {
 
 	// Update power metrics
 	b.updatePower()
+
+	// Send configured gear ratios once per power-up, detected by the first
+	// Status1 frame. Built inline rather than via SetGear: HandleFrame
+	// already holds b.mu here, and SetGear takes it too.
+	if !b.gearsSentOnPower && len(b.gearRatioValues) > 0 {
+		b.gearsSentOnPower = true
+		for i, ratio := range b.gearRatioValues {
+			gear := uint8(i + 1)
+			gearFrame := can.Frame{
+				ID:     BoschGearControlFrameID,
+				Length: 1,
+				Data:   [8]byte{},
+			}
+			gearFrame.Data[0] = ratio
+			if err := b.bus.Publish(gearFrame); err != nil {
+				b.logger.Error("Failed to send gear %d on power-up: %v", gear, err)
+			} else {
+				b.logger.Debug("Sent gear %d (ratio: %d) on ECU power-up", gear, ratio)
+			}
+		}
+	}
 
 	return nil
 }

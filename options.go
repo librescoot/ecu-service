@@ -21,4 +21,5 @@ type Options struct {
 	CANDevice       string
 	ECUType         ecu.ECUType
 	Logger          *LeveledLogger
+	GearRatioValues []uint8
 }

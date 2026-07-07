@@ -190,10 +190,11 @@ func NewEngineApp(opts *Options) (*EngineApp, error) {
 
 	// Create and initialize ECU
 	ecuConfig := ecu.ECUConfig{
-		Logger:    app.log,
-		CANDevice: opts.CANDevice,
-		CANBus:    bus,
-		ECUType:   opts.ECUType,
+		Logger:          app.log,
+		CANDevice:       opts.CANDevice,
+		CANBus:          bus,
+		ECUType:         opts.ECUType,
+		GearRatioValues: opts.GearRatioValues,
 	}
 
 	app.ecu = ecu.NewECU(opts.ECUType)

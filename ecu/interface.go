@@ -17,10 +17,11 @@ const (
 
 // ECUConfig contains configuration for the ECU
 type ECUConfig struct {
-	Logger    Logger
-	CANDevice string
-	CANBus    *can.Bus
-	ECUType   ECUType
+	Logger          Logger
+	CANDevice       string
+	CANBus          *can.Bus
+	ECUType         ECUType
+	GearRatioValues []uint8 // Bosch: per-gear ratio values sent via 0x4E1 on power-up
 }
 
 // GearRatios are the per-gear current and torque scaling factors (0-100%)

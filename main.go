@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -20,6 +22,7 @@ var (
 	redisPort   = flag.Int("redis_port", 6379, "Redis server port")
 	canDevice   = flag.String("can_device", "can0", "CAN device name")
 	ecuType     = flag.String("ecu_type", "bosch", "ECU type (bosch or votol)")
+	gearRatios  = flag.String("gear_ratios", "", "Bosch ECU gear ratios (comma-separated values 1-3, each 1-255, e.g. '100,150,200')")
 )
 
 func printVersion() {
@@ -75,6 +78,28 @@ func main() {
 		logger.Fatalf("invalid ECU type: %s (must be 'bosch' or 'votol')", *ecuType)
 	}
 
+	// Parse gear ratios if provided
+	var gearRatioValues []uint8
+	if *gearRatios != "" {
+		parts := strings.Split(*gearRatios, ",")
+		if len(parts) > 3 {
+			logger.Fatalf("invalid gear_ratios: maximum 3 gears allowed, got %d", len(parts))
+		}
+		gearRatioValues = make([]uint8, 0, len(parts))
+		for i, part := range parts {
+			part = strings.TrimSpace(part)
+			val, err := strconv.ParseUint(part, 10, 8)
+			if err != nil {
+				logger.Fatalf("invalid gear_ratios: gear %d has invalid value '%s'", i+1, part)
+			}
+			if val == 0 || val > 255 {
+				logger.Fatalf("invalid gear_ratios: gear %d value must be 1-255, got %d", i+1, val)
+			}
+			gearRatioValues = append(gearRatioValues, uint8(val))
+		}
+		logger.Info("Loaded %d gear ratio(s): %v", len(gearRatioValues), gearRatioValues)
+	}
+
 	opts := &Options{
 		LogLevel:        LogLevel(*logLevel),
 		RedisServerAddr: *redisServer,
@@ -82,6 +107,7 @@ func main() {
 		CANDevice:       *canDevice,
 		ECUType:         ecuTypeEnum,
 		Logger:          logger,
+		GearRatioValues: gearRatioValues,
 	}
 
 	app, err := NewEngineApp(opts)
