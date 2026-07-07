@@ -48,6 +48,37 @@ type Status struct {
 	Gear                 uint8
 	FirmwareVersion      uint32
 	WarrantyDate         uint32
+
+	// Status4 bits reported by the ECU (paired enable/disable decode).
+	ECUStatusEnabled bool
+	BoostActive      bool // same signal as BoostEnabled, published under its own key for parity with the ECU/gear-mode status trio
+	GearModeEnabled  bool
+
+	// Per-gear current/torque ratios (0-100 %), from the Gear frame (0x7E4).
+	HighGearCurrent uint8
+	MidGearCurrent  uint8
+	LowGearCurrent  uint8
+	HighGearTorque  uint8
+	MidGearTorque   uint8
+	LowGearTorque   uint8
+
+	// Decoded software-version / motor spec components, from Status5 (0x7E8).
+	MotorRatedPowerKW uint8
+	MotorMaxSpeedKMH  uint8
+	SWBaseVersion     string
+	SWAppVersion      string
+}
+
+// ECUConfigStatus carries the ECU configuration values broadcast at boot or
+// in response to a status request (0x4EF). Values are 0 until the ECU
+// reports them.
+type ECUConfigStatus struct {
+	OverVoltageThresholdMV  uint32
+	UnderVoltageThresholdMV uint32
+	SpeedLimitRatio         uint8
+	WheelCircumferenceCM    uint8
+	MaxPhaseCurrentMA       uint32
+	StartupPhaseCurrentMA   uint32
 }
 
 type IPCTx struct {
@@ -74,6 +105,13 @@ func onOff(b bool) string {
 		return "on"
 	}
 	return "off"
+}
+
+func enabledDisabled(b bool) string {
+	if b {
+		return "enabled"
+	}
+	return "disabled"
 }
 
 // SendStatus writes engine-ecu hash fields, but only those whose value changed
@@ -116,11 +154,30 @@ func (tx *IPCTx) SendStatus(s Status) error {
 	add("regen-reason", s.RegenReason, s.RegenReason != l.RegenReason)
 	add("regen-expected", s.RegenExpected, s.RegenExpected != l.RegenExpected)
 	add("gear", s.Gear, s.Gear != l.Gear)
+	add("ecu-status", enabledDisabled(s.ECUStatusEnabled), s.ECUStatusEnabled != l.ECUStatusEnabled)
+	add("boost-status", enabledDisabled(s.BoostActive), s.BoostActive != l.BoostActive)
+	add("gear-mode", enabledDisabled(s.GearModeEnabled), s.GearModeEnabled != l.GearModeEnabled)
 	if s.FirmwareVersion != 0 && (first || s.FirmwareVersion != l.FirmwareVersion) {
 		fields["fw-version"] = fmt.Sprintf("%08X", s.FirmwareVersion)
+		fields["motor:rated-power-kw"] = s.MotorRatedPowerKW
+		fields["motor:max-speed-kmh"] = s.MotorMaxSpeedKMH
+		fields["fw:base-version"] = s.SWBaseVersion
+		fields["fw:app-version"] = s.SWAppVersion
 	}
 	if s.WarrantyDate != 0 && (first || s.WarrantyDate != l.WarrantyDate) {
 		fields["warranty-date"] = fmt.Sprintf("%08X", s.WarrantyDate)
+	}
+	// Per-gear ratios are only meaningful once seen. Publishing zeros at
+	// boot would overwrite previously-cached values; skip the whole block
+	// when nothing has been reported yet.
+	if s.HighGearCurrent != 0 || s.MidGearCurrent != 0 || s.LowGearCurrent != 0 ||
+		s.HighGearTorque != 0 || s.MidGearTorque != 0 || s.LowGearTorque != 0 {
+		fields["gear:high-current-ratio"] = s.HighGearCurrent
+		fields["gear:mid-current-ratio"] = s.MidGearCurrent
+		fields["gear:low-current-ratio"] = s.LowGearCurrent
+		fields["gear:high-torque-ratio"] = s.HighGearTorque
+		fields["gear:mid-torque-ratio"] = s.MidGearTorque
+		fields["gear:low-torque-ratio"] = s.LowGearTorque
 	}
 
 	tx.last = s
@@ -131,6 +188,57 @@ func (tx *IPCTx) SendStatus(s Status) error {
 	}
 
 	_, err := tx.raw.HSet(tx.ctx, ecuHashKey, fields).Result()
+	return err
+}
+
+// SendECUConfig publishes the ECU's reported configuration values. Each group
+// of fields corresponds to a single CAN frame (or pair of frames that arrive
+// together). When a group has not been seen — its canonical value is still
+// zero — the fields are HDEL'd so callers can distinguish "not reported" from
+// a real zero reading. Without this, a field populated only by an infrequent
+// 0x4EF settings burst would otherwise show a misleading "0" for as long as
+// the bus stays busy enough that the comm-lost watcher never triggers 0x4EF.
+func (tx *IPCTx) SendECUConfig(c ECUConfigStatus) error {
+	pipe := tx.raw.Pipeline()
+
+	// 0x7E9 + 0x7EA: over- and under-voltage thresholds arrive together in
+	// the 0x4EF settings burst.
+	voltageKeys := []string{"config:ov-threshold-mv", "config:uv-threshold-mv"}
+	if c.OverVoltageThresholdMV != 0 {
+		pipe.HSet(tx.ctx, ecuHashKey, map[string]any{
+			"config:ov-threshold-mv": c.OverVoltageThresholdMV,
+			"config:uv-threshold-mv": c.UnderVoltageThresholdMV,
+		})
+	} else {
+		pipe.HDel(tx.ctx, ecuHashKey, voltageKeys...)
+	}
+
+	// 0x7EB: speed limit ratio
+	if c.SpeedLimitRatio != 0 {
+		pipe.HSet(tx.ctx, ecuHashKey, "config:speed-limit-ratio", c.SpeedLimitRatio)
+	} else {
+		pipe.HDel(tx.ctx, ecuHashKey, "config:speed-limit-ratio")
+	}
+
+	// 0x7EC: wheel circumference
+	if c.WheelCircumferenceCM != 0 {
+		pipe.HSet(tx.ctx, ecuHashKey, "config:wheel-circumference-cm", c.WheelCircumferenceCM)
+	} else {
+		pipe.HDel(tx.ctx, ecuHashKey, "config:wheel-circumference-cm")
+	}
+
+	// 0x7EE + 0x7EF: max and startup phase currents
+	phaseKeys := []string{"config:max-phase-current-ma", "config:startup-phase-current-ma"}
+	if c.MaxPhaseCurrentMA != 0 {
+		pipe.HSet(tx.ctx, ecuHashKey, map[string]any{
+			"config:max-phase-current-ma":     c.MaxPhaseCurrentMA,
+			"config:startup-phase-current-ma": c.StartupPhaseCurrentMA,
+		})
+	} else {
+		pipe.HDel(tx.ctx, ecuHashKey, phaseKeys...)
+	}
+
+	_, err := pipe.Exec(tx.ctx)
 	return err
 }
 

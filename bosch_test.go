@@ -262,11 +262,17 @@ func TestStatus4_KERSDisabled(t *testing.T) {
 
 func TestStatus4_BoostReported(t *testing.T) {
 	ecu := newTestECU()
-	ecu.HandleFrame(makeFrame(frameStatus4, []byte{0x04})) // bit 2
+	ecu.HandleFrame(makeFrame(frameStatus4, []byte{0x04})) // bit 2: boost enabled
 	if !ecu.BoostEnabled() {
 		t.Error("expected boost reported from ECU")
 	}
+	// Byte 0 is a paired enable/disable register: neither bit set leaves the
+	// previous state latched, so clearing boost requires the disable bit.
 	ecu.HandleFrame(makeFrame(frameStatus4, []byte{0x00}))
+	if !ecu.BoostEnabled() {
+		t.Error("expected boost to stay latched when neither enable nor disable bit is set")
+	}
+	ecu.HandleFrame(makeFrame(frameStatus4, []byte{0x08})) // bit 3: boost disabled
 	if ecu.BoostEnabled() {
 		t.Error("expected boost cleared from ECU")
 	}
@@ -281,6 +287,59 @@ func TestGear_Values(t *testing.T) {
 		if ecu.Gear() != g {
 			t.Errorf("gear: expected %d, got %d", g, ecu.Gear())
 		}
+	}
+}
+
+func TestGear_WithRatios(t *testing.T) {
+	ecu := newTestECU()
+	// gear=1, then high/mid/low current ratios, high/mid/low torque ratios
+	data := []byte{1, 100, 75, 50, 90, 65, 40}
+	ecu.HandleFrame(makeFrame(frameGear, data))
+
+	got := ecu.GearRatios()
+	want := GearRatios{HighCurrent: 100, MidCurrent: 75, LowCurrent: 50, HighTorque: 90, MidTorque: 65, LowTorque: 40}
+	if got != want {
+		t.Errorf("ratios: expected %+v, got %+v", want, got)
+	}
+}
+
+func TestGear_ShortFrameLeavesRatiosUnset(t *testing.T) {
+	ecu := newTestECU()
+	ecu.HandleFrame(makeFrame(frameGear, []byte{2}))
+	if got := ecu.GearRatios(); got != (GearRatios{}) {
+		t.Errorf("ratios: expected zero value on short frame, got %+v", got)
+	}
+}
+
+// --- Status4 (0x7E3), paired-bit decode ---
+
+func TestStatus4_AllBits(t *testing.T) {
+	// 0x9A = 0b10011010: bit1 (ECU disabled), bit3 (boost disabled),
+	// bit4 (gear mode enabled), bit7 (KERS disabled).
+	ecu := newTestECU()
+	ecu.HandleFrame(makeFrame(frameStatus4, []byte{0x9A}))
+
+	if ecu.ECUStatusEnabled() {
+		t.Error("ECU should be reported disabled")
+	}
+	if ecu.BoostActive() {
+		t.Error("boost should be reported disabled")
+	}
+	if !ecu.GearModeEnabled() {
+		t.Error("gear mode should be reported enabled")
+	}
+	if ecu.KersECUEnabled() {
+		t.Error("KERS should be reported disabled")
+	}
+}
+
+func TestStatus4_DisableBitWins(t *testing.T) {
+	// Both bits set in a pair: the disable bit must take precedence so we
+	// never falsely report a feature as on.
+	ecu := newTestECU()
+	ecu.HandleFrame(makeFrame(frameStatus4, []byte{0x03})) // ECU enabled + disabled
+	if ecu.ECUStatusEnabled() {
+		t.Error("disable bit should win over enable bit")
 	}
 }
 
@@ -305,6 +364,78 @@ func TestStatus5_ShortFrameIgnored(t *testing.T) {
 	ecu.HandleFrame(makeFrame(frameStatus5, make([]byte, 4)))
 	if ecu.FirmwareVersion() != 0 {
 		t.Errorf("firmware should be 0 after short frame, got 0x%X", ecu.FirmwareVersion())
+	}
+}
+
+func TestStatus5_SoftwareVersion(t *testing.T) {
+	ecu := newTestECU()
+	// reserved=0, motor=4kW (0x04), max=45km/h (0x45), base=v4.0 (0x40), app rev 12 (0x0C)
+	data := []byte{0x00, 0x00, 0x00, 0x00, 0x04, 0x45, 0x40, 0x0C}
+	ecu.HandleFrame(makeFrame(frameStatus5, data))
+
+	got := ecu.SoftwareVersion()
+	want := SoftwareVersion{MotorRatedPowerKW: 4, MotorMaxSpeedKMH: 45, BaseVersion: "4.0", AppVersion: "12"}
+	if got != want {
+		t.Errorf("software version: expected %+v, got %+v", want, got)
+	}
+}
+
+func TestBCDByteToDecimal(t *testing.T) {
+	tests := []struct {
+		in   byte
+		want uint8
+	}{
+		{0x04, 4},
+		{0x45, 45},
+		{0x99, 99},
+		{0x00, 0},
+		{0xAB, 0xAB}, // non-BCD digits: passthrough
+	}
+	for _, tt := range tests {
+		if got := bcdByteToDecimal(tt.in); got != tt.want {
+			t.Errorf("bcdByteToDecimal(0x%02X): expected %d, got %d", tt.in, tt.want, got)
+		}
+	}
+}
+
+// --- Config frames (0x7E9-0x7EF) ---
+
+func TestConfigFrames(t *testing.T) {
+	ecu := newTestECU()
+
+	ecu.HandleFrame(makeFrame(frameMaxVoltage, []byte{0x1B, 0x75}))          // 0x1B75 * 10 = 70290 mV
+	ecu.HandleFrame(makeFrame(frameMinVoltage, []byte{0x0F, 0x99}))          // 0x0F99 * 10 = 39930 mV
+	ecu.HandleFrame(makeFrame(frameSpeedLimit, []byte{0x64}))                // 100 %
+	ecu.HandleFrame(makeFrame(frameWheelCircumference, []byte{0x7E}))        // 126 cm
+	ecu.HandleFrame(makeFrame(frameMaxPhaseCurrent, []byte{0x52, 0x08}))     // 0x5208 * 10 = 210000 mA
+	ecu.HandleFrame(makeFrame(frameStartupPhaseCurrent, []byte{0x03, 0xE8})) // 0x03E8 * 10 = 10000 mA
+
+	got := ecu.ConfigReport()
+	want := ConfigReport{
+		OverVoltageThresholdMV:  70290,
+		UnderVoltageThresholdMV: 39930,
+		SpeedLimitRatio:         100,
+		WheelCircumferenceCM:    126,
+		MaxPhaseCurrentMA:       210000,
+		StartupPhaseCurrentMA:   10000,
+	}
+	if got != want {
+		t.Errorf("config report: expected %+v, got %+v", want, got)
+	}
+}
+
+func TestEBSStatus_MirrorsAcceptedSettings(t *testing.T) {
+	ecu := newTestECU()
+	// 56 V / 10 A in 10-unit increments
+	data := []byte{0x15, 0xE0, 0x03, 0xE8}
+	ecu.HandleFrame(makeFrame(frameEBSStatus, data))
+
+	got := ecu.ConfigReport()
+	if got.EBSVoltageMV != 56000 {
+		t.Errorf("EBS voltage: expected 56000, got %d", got.EBSVoltageMV)
+	}
+	if got.EBSCurrentMA != 10000 {
+		t.Errorf("EBS current: expected 10000, got %d", got.EBSCurrentMA)
 	}
 }
 

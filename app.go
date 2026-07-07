@@ -40,6 +40,7 @@ type App struct {
 	lastKersReason     KERSReason
 	lastRegenAvailable bool
 	lastRegenReason    string
+	lastECUConfig      ECUConfigStatus
 }
 
 func NewApp(ctx context.Context, opts Options) (*App, error) {
@@ -69,9 +70,16 @@ func NewApp(ctx context.Context, opts Options) (*App, error) {
 	}
 	a.bus = bus
 
-	a.ecu = newECU(bus, log)
+	a.ecu = newECU(bus, log, opts.GearRatioValues)
 	a.battery = &BatteryTracker{}
 	a.ipcTx = newIPCTx(ctx, client, log)
+
+	// Publish a zero-valued config so any stale config:* fields left behind
+	// by a previous service instance get HDEL'd. Real values reappear as
+	// soon as the ECU broadcasts them.
+	if err := a.ipcTx.SendECUConfig(ECUConfigStatus{}); err != nil {
+		log.Error("Failed to send default ECU config: %v", err)
+	}
 
 	a.lastKersReason = KERSReasonNone
 
@@ -214,6 +222,9 @@ func (h *appHandler) Handle(frame can.Frame) {
 }
 
 func (a *App) onFrame() {
+	ratios := a.ecu.GearRatios()
+	sw := a.ecu.SoftwareVersion()
+
 	s := Status{
 		Voltage:              a.ecu.Voltage(),
 		Current:              a.ecu.Current(),
@@ -236,6 +247,19 @@ func (a *App) onFrame() {
 		Gear:                 a.ecu.Gear(),
 		FirmwareVersion:      a.ecu.FirmwareVersion(),
 		WarrantyDate:         a.ecu.WarrantyDate(),
+		ECUStatusEnabled:     a.ecu.ECUStatusEnabled(),
+		BoostActive:          a.ecu.BoostActive(),
+		GearModeEnabled:      a.ecu.GearModeEnabled(),
+		HighGearCurrent:      ratios.HighCurrent,
+		MidGearCurrent:       ratios.MidCurrent,
+		LowGearCurrent:       ratios.LowCurrent,
+		HighGearTorque:       ratios.HighTorque,
+		MidGearTorque:        ratios.MidTorque,
+		LowGearTorque:        ratios.LowTorque,
+		MotorRatedPowerKW:    sw.MotorRatedPowerKW,
+		MotorMaxSpeedKMH:     sw.MotorMaxSpeedKMH,
+		SWBaseVersion:        sw.BaseVersion,
+		SWAppVersion:         sw.AppVersion,
 	}
 	if s.FaultCode != 0 {
 		_, cfg := MapFault(s.FaultCode)
@@ -249,6 +273,23 @@ func (a *App) onFrame() {
 
 	if err := a.ipcTx.SendStatus(s); err != nil {
 		a.log.Error("SendStatus: %v", err)
+	}
+
+	cfg := a.ecu.ConfigReport()
+	ecuConfig := ECUConfigStatus{
+		OverVoltageThresholdMV:  cfg.OverVoltageThresholdMV,
+		UnderVoltageThresholdMV: cfg.UnderVoltageThresholdMV,
+		SpeedLimitRatio:         cfg.SpeedLimitRatio,
+		WheelCircumferenceCM:    cfg.WheelCircumferenceCM,
+		MaxPhaseCurrentMA:       cfg.MaxPhaseCurrentMA,
+		StartupPhaseCurrentMA:   cfg.StartupPhaseCurrentMA,
+	}
+	if ecuConfig != a.lastECUConfig {
+		if err := a.ipcTx.SendECUConfig(ecuConfig); err != nil {
+			a.log.Error("SendECUConfig: %v", err)
+		} else {
+			a.lastECUConfig = ecuConfig
+		}
 	}
 
 	if s.ThrottleOn != a.lastThrottle {

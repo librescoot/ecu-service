@@ -11,8 +11,9 @@ const (
 )
 
 type Options struct {
-	LogLevel    LogLevel
-	RedisServer string
-	RedisPort   int
-	CANDevice   string
+	LogLevel        LogLevel
+	RedisServer     string
+	RedisPort       int
+	CANDevice       string
+	GearRatioValues []uint8
 }
