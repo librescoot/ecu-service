@@ -118,11 +118,11 @@ func (tx *IPCTx) SendStatus4(data RedisStatus4) error {
 
 	enabledStr := map[bool]string{true: "enabled", false: "disabled"}
 	pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
-		"kers":            map[bool]string{true: "on", false: "off"}[data.KersOn],
-		"boost":           map[bool]string{true: "on", false: "off"}[data.BoostOn],
-		"ecu-status":      enabledStr[data.EcuEnabled],
-		"boost-status":    enabledStr[data.BoostActive],
-		"gear-mode":       enabledStr[data.GearModeEnabled],
+		"kers":         map[bool]string{true: "on", false: "off"}[data.KersOn],
+		"boost":        map[bool]string{true: "on", false: "off"}[data.BoostOn],
+		"ecu-status":   enabledStr[data.EcuEnabled],
+		"boost-status": enabledStr[data.BoostActive],
+		"gear-mode":    enabledStr[data.GearModeEnabled],
 	})
 
 	// Also publish KERS state changes
