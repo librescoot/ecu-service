@@ -68,6 +68,6 @@ type RedisEBS struct {
 	AcceptedVoltage int // mV
 	AcceptedCurrent int // mA
 	RegenAvailable  bool
-	RegenReason     string // none/cold/hot/off/full
+	RegenReason     string // none/cold/hot/off/standstill/full
 	RegenExpected   int    // mA
 }

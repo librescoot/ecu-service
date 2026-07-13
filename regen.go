@@ -19,21 +19,27 @@ const (
 	// regenVLoopBandMV is the over-voltage band, above the accepted cap, over
 	// which the voltage loop ramps regen from full authority down to zero.
 	regenVLoopBandMV = 3050
+	// regenEngageMinWheelRPM is the wheel-speed floor below which the ECU stops
+	// recuperating (near standstill), regardless of voltage headroom.
+	// Empirically the engage/disengage deadband sits right at this reported
+	// wheel-RPM value; ~90 RPM is ~7 km/h.
+	regenEngageMinWheelRPM = 90
 )
 
 // RegenState is the derived view of whether regen is available, why not, and
 // how much braking current the ECU is expected to allow right now.
 type RegenState struct {
 	Available  bool
-	Reason     string // "none" when available; otherwise cold/hot/off/full
+	Reason     string // "none" when available; otherwise cold/hot/off/standstill/full
 	ExpectedMA int    // expected regen current envelope, in mA
 }
 
 // computeRegen derives the regen envelope from the accepted EBS caps, the live
-// pack voltage and the KERS arm state/reason. armReason is "none"/"cold"/"hot".
-// vMaxMV/iMaxMA are the accepted caps echoed by the ECU (0 until the first EBS
-// Status frame, or when the controller does not report them).
-func computeRegen(enabled bool, armReason string, vPackMV, vMaxMV, iMaxMA int) RegenState {
+// pack voltage, wheel speed and the KERS arm state/reason. armReason is
+// "none"/"cold"/"hot". wheelRPM is the ECU-reported wheel speed. vMaxMV/iMaxMA
+// are the accepted caps echoed by the ECU (0 until the first EBS Status frame,
+// or when the controller does not report them).
+func computeRegen(enabled bool, armReason string, wheelRPM, vPackMV, vMaxMV, iMaxMA int) RegenState {
 	// Temperature gating disarms KERS outright.
 	switch armReason {
 	case "cold":
@@ -44,6 +50,11 @@ func computeRegen(enabled bool, armReason string, vPackMV, vMaxMV, iMaxMA int) R
 	// Not armed (user-disabled or not yet ready to drive).
 	if !enabled {
 		return RegenState{Available: false, Reason: "off"}
+	}
+	// Near standstill the ECU falls below its regen engage-speed deadband and
+	// won't recuperate regardless of voltage headroom.
+	if wheelRPM < regenEngageMinWheelRPM {
+		return RegenState{Available: false, Reason: "standstill"}
 	}
 	// No accepted caps (no EBS Status frame, or controller doesn't report
 	// them) — assume available rather than flag a limit we can't assess.
