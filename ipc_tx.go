@@ -43,7 +43,7 @@ type Status struct {
 	AcceptedRegenVoltage int    // mV, EBS regen voltage cap the ECU accepted
 	AcceptedRegenCurrent int    // mA, EBS regen current limit the ECU accepted
 	RegenAvailable       bool   // derived: can regen happen right now
-	RegenReason          string // derived: none/cold/hot/off/full
+	RegenReason          string // derived: none/cold/hot/off/standstill/full
 	RegenExpected        int    // derived: expected regen current envelope, mA
 	Gear                 uint8
 	FirmwareVersion      uint32

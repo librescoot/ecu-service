@@ -266,7 +266,7 @@ func (a *App) onFrame() {
 		s.FaultDesc = cfg.Description
 	}
 
-	regen := computeRegen(s.KersActive, a.lastKersReason, s.Voltage, s.AcceptedRegenVoltage, s.AcceptedRegenCurrent)
+	regen := computeRegen(s.KersActive, a.lastKersReason, int(s.RPM), s.Voltage, s.AcceptedRegenVoltage, s.AcceptedRegenCurrent)
 	s.RegenAvailable = regen.Available
 	s.RegenReason = regen.Reason
 	s.RegenExpected = regen.ExpectedMA
