@@ -9,7 +9,7 @@ import (
 	"ecu-service/ecu" // Local ECU package
 
 	"github.com/brutella/can"
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
