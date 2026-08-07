@@ -66,6 +66,54 @@ func (tx *IPCTx) SendStatus1(data RedisStatus1) error {
 	return nil
 }
 
+// SendDefaultStatus1 writes the volatile Status1 fields for an ECU whose
+// state is unknown, which is the situation at startup before any CAN
+// frame has arrived.
+//
+// Unlike SendStatus1 it does not touch energy:consumed or
+// energy:recovered. Those only ever go up, the ECU does not re-report
+// them until it is powered, and writing zeros over them meant every
+// service restart silently destroyed the accumulated totals. They are
+// seeded with HSETNX instead: a cold boot starts them at 0 (Redis is
+// wiped on every reboot) while a restart leaves the running totals alone.
+func (tx *IPCTx) SendDefaultStatus1() error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	pipe := tx.redis.Pipeline()
+	pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
+		"motor:voltage": 0,
+		"motor:current": 0,
+		"rpm":           0,
+		"speed":         0,
+		"raw-speed":     0,
+		"throttle":      "off",
+		"brake":         "off",
+		"power":         0,
+	})
+	pipe.HSetNX(tx.ctx, "engine-ecu", "energy:consumed", 0)
+	pipe.HSetNX(tx.ctx, "engine-ecu", "energy:recovered", 0)
+
+	if _, err := pipe.Exec(tx.ctx); err != nil {
+		return fmt.Errorf("failed to send default Status1: %v", err)
+	}
+	return nil
+}
+
+// SeedOdometer sets the odometer to 0 only if the field is absent, so a
+// cold boot has a value to report while a restart keeps the running
+// total. The cached odometer from the previous shutdown is restored
+// separately, right after this.
+func (tx *IPCTx) SeedOdometer() error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	if err := tx.redis.HSetNX(tx.ctx, "engine-ecu", "odometer", 0).Err(); err != nil {
+		return fmt.Errorf("failed to seed odometer: %v", err)
+	}
+	return nil
+}
+
 func (tx *IPCTx) SendStatus2(data RedisStatus2) error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()

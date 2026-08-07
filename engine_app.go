@@ -65,26 +65,9 @@ func (app *EngineApp) writeDefaultRedisState() {
 	app.mu.Lock()
 	defer app.mu.Unlock()
 
-	// Default Status1 values
-	status1 := RedisStatus1{
-		MotorVoltage:    0,     // 0V
-		MotorCurrent:    0,     // 0A
-		RPM:             0,     // 0 RPM
-		Speed:           0,     // 0 km/h
-		ThrottleOn:      false, // Throttle off
-		Power:           0,
-		EnergyConsumed:  0,
-		EnergyRecovered: 0,
-	}
-
 	// Default Status2 values
 	status2 := RedisStatus2{
 		Temperature: 0, // 0°C
-	}
-
-	// Default Status3 values
-	status3 := RedisStatus3{
-		Odometer: 0, // 0 meters
 	}
 
 	// Default Status4 values
@@ -93,8 +76,10 @@ func (app *EngineApp) writeDefaultRedisState() {
 		BoostOn: false, // Boost disabled
 	}
 
-	// Write all default values to Redis
-	if err := app.ipcTx.SendStatus1(status1); err != nil {
+	// Volatile fields go to their unknown-state values. The cumulative
+	// counters (energy:consumed, energy:recovered, odometer) are seeded
+	// only when absent, so a restart no longer wipes running totals.
+	if err := app.ipcTx.SendDefaultStatus1(); err != nil {
 		app.log.Error("Failed to send default Status1: %v", err)
 	}
 
@@ -102,8 +87,8 @@ func (app *EngineApp) writeDefaultRedisState() {
 		app.log.Error("Failed to send default Status2: %v", err)
 	}
 
-	if err := app.ipcTx.SendStatus3(status3); err != nil {
-		app.log.Error("Failed to send default Status3: %v", err)
+	if err := app.ipcTx.SeedOdometer(); err != nil {
+		app.log.Error("Failed to seed odometer: %v", err)
 	}
 
 	if err := app.ipcTx.SendStatus4(status4); err != nil {
