@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -143,7 +144,7 @@ func (rx *IPCRx) handleVehicleSubscription() {
 				return
 			}
 			// Check for closed client - panic to trigger systemd restart
-			if err.Error() == "redis: client is closed" {
+			if errors.Is(err, redis.ErrClosed) {
 				rx.log.Error("Redis connection lost on vehicle subscription - restarting service")
 				panic("Redis disconnected")
 			}
@@ -186,7 +187,7 @@ func (rx *IPCRx) handleSettingsSubscription() {
 				return
 			}
 			// Check for closed client - panic to trigger systemd restart
-			if err.Error() == "redis: client is closed" {
+			if errors.Is(err, redis.ErrClosed) {
 				rx.log.Error("Redis connection lost on settings subscription - restarting service")
 				panic("Redis disconnected")
 			}
@@ -382,7 +383,7 @@ func (rx *IPCRx) handleBatterySubscription(idx int) {
 				return
 			}
 			// Check for closed client - panic to trigger systemd restart
-			if err.Error() == "redis: client is closed" {
+			if errors.Is(err, redis.ErrClosed) {
 				rx.log.Error("Redis connection lost on battery %d subscription - restarting service", idx)
 				panic("Redis disconnected")
 			}
