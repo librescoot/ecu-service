@@ -5,335 +5,317 @@ import (
 	"fmt"
 	"sync"
 
+	ipc "github.com/librescoot/redis-ipc"
 	"github.com/redis/go-redis/v9"
 )
 
+const (
+	ecuHashKey      = "engine-ecu"
+	faultSetKey     = "engine-ecu:fault"
+	faultStreamKey  = "events:faults"
+	faultStreamMax  = 1000
+	ecuChannel      = "engine-ecu"
+	throttleChannel = "engine-ecu throttle"
+	odometerChannel = "engine-ecu odometer"
+	kersChannel     = "engine-ecu kers"
+	kersReasonChan  = "engine-ecu kers-reason-off"
+	regenChannel    = "engine-ecu regen-available"
+)
+
+type Status struct {
+	Voltage              int
+	Current              int
+	RPM                  uint16
+	Speed                uint16
+	RawSpeed             uint16
+	ThrottleOn           bool
+	BrakeOn              bool
+	Power                int
+	EnergyConsumed       uint64
+	EnergyRecovered      uint64
+	Temperature          int8
+	FaultCode            uint32
+	FaultDesc            string
+	Odometer             uint32
+	KersActive           bool
+	BoostEnabled         bool
+	KersReasonOff        string
+	AcceptedRegenVoltage int    // mV, EBS regen voltage cap the ECU accepted
+	AcceptedRegenCurrent int    // mA, EBS regen current limit the ECU accepted
+	RegenAvailable       bool   // derived: can regen happen right now
+	RegenReason          string // derived: none/cold/hot/off/standstill/full
+	RegenExpected        int    // derived: expected regen current envelope, mA
+	Gear                 uint8
+	FirmwareVersion      uint32
+	WarrantyDate         uint32
+
+	// Status4 bits reported by the ECU (paired enable/disable decode).
+	ECUStatusEnabled bool
+	BoostActive      bool // same signal as BoostEnabled, published under its own key for parity with the ECU/gear-mode status trio
+	GearModeEnabled  bool
+
+	// Per-gear current/torque ratios (0-100 %), from the Gear frame (0x7E4).
+	HighGearCurrent uint8
+	MidGearCurrent  uint8
+	LowGearCurrent  uint8
+	HighGearTorque  uint8
+	MidGearTorque   uint8
+	LowGearTorque   uint8
+
+	// Decoded software-version / motor spec components, from Status5 (0x7E8).
+	MotorRatedPowerKW uint8
+	MotorMaxSpeedKMH  uint8
+	SWBaseVersion     string
+	SWAppVersion      string
+}
+
+// ECUConfigStatus carries the ECU configuration values broadcast at boot or
+// in response to a status request (0x4EF). Values are 0 until the ECU
+// reports them.
+type ECUConfigStatus struct {
+	OverVoltageThresholdMV  uint32
+	UnderVoltageThresholdMV uint32
+	SpeedLimitRatio         uint8
+	WheelCircumferenceCM    uint8
+	MaxPhaseCurrentMA       uint32
+	StartupPhaseCurrentMA   uint32
+}
+
 type IPCTx struct {
-	log   *LeveledLogger
-	redis *redis.Client
-	mu    sync.Mutex
-	ctx   context.Context
+	raw    *redis.Client // underlying go-redis client for pipeline writes
+	client *ipc.Client
+	ctx    context.Context
+	log    *Logger
 
-	throttleKnown  bool // whether lastThrottleOn has been set yet
-	lastThrottleOn bool // last published throttle state (guarded by mu)
+	// mu guards last/hasLast, which SendStatus (CAN goroutine) and SetFault
+	// (watchdog goroutine) both touch.
+	mu sync.Mutex
+	// last is the previously sent status; SendStatus only HSETs changed fields
+	// to avoid redundant Redis writes on every CAN frame.
+	last    Status
+	hasLast bool
 }
 
-func NewIPCTx(logger *LeveledLogger, redis *redis.Client) *IPCTx {
-	return &IPCTx{
-		log:   logger,
-		redis: redis,
-		ctx:   context.Background(),
+func newIPCTx(ctx context.Context, client *ipc.Client, log *Logger) *IPCTx {
+	return &IPCTx{raw: client.Raw(), client: client, ctx: ctx, log: log}
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
 	}
+	return "off"
 }
 
-func (tx *IPCTx) Destroy() {}
+func enabledDisabled(b bool) string {
+	if b {
+		return "enabled"
+	}
+	return "disabled"
+}
 
-func (tx *IPCTx) SendStatus1(data RedisStatus1) error {
+// SendStatus writes engine-ecu hash fields, but only those whose value changed
+// since the previous call. Slow-moving fields (temperature, fault, odometer,
+// gear, firmware) are skipped on most frames; if nothing changed the call is a
+// no-op. The first call after start writes everything.
+func (tx *IPCTx) SendStatus(s Status) error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 
-	pipe := tx.redis.Pipeline()
+	first := !tx.hasLast
+	l := tx.last
+	fields := make(map[string]any, 18)
 
-	pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
-		"motor:voltage":    data.MotorVoltage,
-		"motor:current":    data.MotorCurrent,
-		"rpm":              data.RPM,
-		"speed":            data.Speed,
-		"raw-speed":        data.RawSpeed,
-		"throttle":         map[bool]string{true: "on", false: "off"}[data.ThrottleOn],
-		"brake":            map[bool]string{true: "on", false: "off"}[data.BrakeOn],
-		"power":            data.Power,
-		"energy:consumed":  data.EnergyConsumed,
-		"energy:recovered": data.EnergyRecovered,
-	})
-
-	_, err := pipe.Exec(tx.ctx)
-	if err != nil {
-		return fmt.Errorf("failed to send Status1: %v", err)
-	}
-
-	// Publish a throttle notification only when the state changes; Status1 is
-	// sent on every frame (speed/current jitter), so an unconditional publish
-	// would notify at frame rate.
-	if !tx.throttleKnown || data.ThrottleOn != tx.lastThrottleOn {
-		tx.throttleKnown = true
-		tx.lastThrottleOn = data.ThrottleOn
-		if err := tx.redis.Publish(tx.ctx, "engine-ecu", "throttle").Err(); err != nil {
-			return fmt.Errorf("failed to publish throttle state: %v", err)
+	add := func(key string, val any, changed bool) {
+		if first || changed {
+			fields[key] = val
 		}
 	}
-
-	return nil
-}
-
-// SendDefaultStatus1 writes the volatile Status1 fields for an ECU whose
-// state is unknown, which is the situation at startup before any CAN
-// frame has arrived.
-//
-// Unlike SendStatus1 it does not touch energy:consumed or
-// energy:recovered. Those only ever go up, the ECU does not re-report
-// them until it is powered, and writing zeros over them meant every
-// service restart silently destroyed the accumulated totals. They are
-// seeded with HSETNX instead: a cold boot starts them at 0 (Redis is
-// wiped on every reboot) while a restart leaves the running totals alone.
-func (tx *IPCTx) SendDefaultStatus1() error {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-
-	pipe := tx.redis.Pipeline()
-	pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
-		"motor:voltage": 0,
-		"motor:current": 0,
-		"rpm":           0,
-		"speed":         0,
-		"raw-speed":     0,
-		"throttle":      "off",
-		"brake":         "off",
-		"power":         0,
-	})
-	pipe.HSetNX(tx.ctx, "engine-ecu", "energy:consumed", 0)
-	pipe.HSetNX(tx.ctx, "engine-ecu", "energy:recovered", 0)
-
-	if _, err := pipe.Exec(tx.ctx); err != nil {
-		return fmt.Errorf("failed to send default Status1: %v", err)
+	add("motor:voltage", s.Voltage, s.Voltage != l.Voltage)
+	add("motor:current", s.Current, s.Current != l.Current)
+	add("rpm", s.RPM, s.RPM != l.RPM)
+	add("speed", s.Speed, s.Speed != l.Speed)
+	add("raw-speed", s.RawSpeed, s.RawSpeed != l.RawSpeed)
+	add("throttle", onOff(s.ThrottleOn), s.ThrottleOn != l.ThrottleOn)
+	add("brake", onOff(s.BrakeOn), s.BrakeOn != l.BrakeOn)
+	add("power", s.Power, s.Power != l.Power)
+	add("energy:consumed", s.EnergyConsumed, s.EnergyConsumed != l.EnergyConsumed)
+	add("energy:recovered", s.EnergyRecovered, s.EnergyRecovered != l.EnergyRecovered)
+	add("temperature", s.Temperature, s.Temperature != l.Temperature)
+	add("fault:code", s.FaultCode, s.FaultCode != l.FaultCode)
+	add("fault:description", s.FaultDesc, s.FaultDesc != l.FaultDesc)
+	add("odometer", s.Odometer, s.Odometer != l.Odometer)
+	add("kers", onOff(s.KersActive), s.KersActive != l.KersActive)
+	add("boost", onOff(s.BoostEnabled), s.BoostEnabled != l.BoostEnabled)
+	add("kers-reason-off", s.KersReasonOff, s.KersReasonOff != l.KersReasonOff)
+	add("kers-accepted-voltage", s.AcceptedRegenVoltage, s.AcceptedRegenVoltage != l.AcceptedRegenVoltage)
+	add("kers-accepted-current", s.AcceptedRegenCurrent, s.AcceptedRegenCurrent != l.AcceptedRegenCurrent)
+	add("regen-available", onOff(s.RegenAvailable), s.RegenAvailable != l.RegenAvailable)
+	add("regen-reason", s.RegenReason, s.RegenReason != l.RegenReason)
+	add("regen-expected", s.RegenExpected, s.RegenExpected != l.RegenExpected)
+	add("gear", s.Gear, s.Gear != l.Gear)
+	add("ecu-status", enabledDisabled(s.ECUStatusEnabled), s.ECUStatusEnabled != l.ECUStatusEnabled)
+	add("boost-status", enabledDisabled(s.BoostActive), s.BoostActive != l.BoostActive)
+	add("gear-mode", enabledDisabled(s.GearModeEnabled), s.GearModeEnabled != l.GearModeEnabled)
+	if s.FirmwareVersion != 0 && (first || s.FirmwareVersion != l.FirmwareVersion) {
+		fields["fw-version"] = fmt.Sprintf("%08X", s.FirmwareVersion)
+		fields["motor:rated-power-kw"] = s.MotorRatedPowerKW
+		fields["motor:max-speed-kmh"] = s.MotorMaxSpeedKMH
+		fields["fw:base-version"] = s.SWBaseVersion
+		fields["fw:app-version"] = s.SWAppVersion
 	}
-	return nil
-}
-
-// SeedOdometer sets the odometer to 0 only if the field is absent, so a
-// cold boot has a value to report while a restart keeps the running
-// total. The cached odometer from the previous shutdown is restored
-// separately, right after this.
-func (tx *IPCTx) SeedOdometer() error {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-
-	if err := tx.redis.HSetNX(tx.ctx, "engine-ecu", "odometer", 0).Err(); err != nil {
-		return fmt.Errorf("failed to seed odometer: %v", err)
+	if s.WarrantyDate != 0 && (first || s.WarrantyDate != l.WarrantyDate) {
+		fields["warranty-date"] = fmt.Sprintf("%08X", s.WarrantyDate)
 	}
-	return nil
-}
-
-func (tx *IPCTx) SendStatus2(data RedisStatus2) error {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-
-	fields := map[string]interface{}{
-		"temperature": data.Temperature,
-		"fault:code":  data.FaultCode,
-	}
-
-	// Only include description if there's an active fault
-	if data.FaultCode != 0 && data.FaultDescription != "" {
-		fields["fault:description"] = data.FaultDescription
-	} else {
-		fields["fault:description"] = ""
-	}
-
-	if err := tx.redis.HSet(tx.ctx, "engine-ecu", fields).Err(); err != nil {
-		return fmt.Errorf("failed to send Status2: %v", err)
-	}
-
-	return nil
-}
-
-func (tx *IPCTx) SendStatus3(data RedisStatus3) error {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-
-	pipe := tx.redis.Pipeline()
-
-	pipe.HSet(tx.ctx, "engine-ecu",
-		"odometer", data.Odometer,
-	)
-
-	// Also publish odometer updates
-	pipe.Publish(tx.ctx, "engine-ecu", "odometer")
-
-	_, err := pipe.Exec(tx.ctx)
-	if err != nil {
-		return fmt.Errorf("failed to send Status3: %v", err)
-	}
-
-	return nil
-}
-
-func (tx *IPCTx) SendStatus4(data RedisStatus4) error {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-
-	pipe := tx.redis.Pipeline()
-
-	enabledStr := map[bool]string{true: "enabled", false: "disabled"}
-	pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
-		"kers":         map[bool]string{true: "on", false: "off"}[data.KersOn],
-		"boost":        map[bool]string{true: "on", false: "off"}[data.BoostOn],
-		"ecu-status":   enabledStr[data.EcuEnabled],
-		"boost-status": enabledStr[data.BoostActive],
-		"gear-mode":    enabledStr[data.GearModeEnabled],
-	})
-
-	// Also publish KERS state changes
-	pipe.Publish(tx.ctx, "engine-ecu", "kers")
-
-	_, err := pipe.Exec(tx.ctx)
-	if err != nil {
-		return fmt.Errorf("failed to send Status4: %v", err)
-	}
-
-	return nil
-}
-
-func (tx *IPCTx) SendEBS(data RedisEBS) error {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-
-	pipe := tx.redis.Pipeline()
-	pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
-		"kers-accepted-voltage": data.AcceptedVoltage,
-		"kers-accepted-current": data.AcceptedCurrent,
-		"regen-available":       map[bool]string{true: "on", false: "off"}[data.RegenAvailable],
-		"regen-reason":          data.RegenReason,
-		"regen-expected":        data.RegenExpected,
-	})
-	pipe.Publish(tx.ctx, "engine-ecu", "regen-available")
-
-	if _, err := pipe.Exec(tx.ctx); err != nil {
-		return fmt.Errorf("failed to send EBS status: %v", err)
-	}
-
-	return nil
-}
-
-func (tx *IPCTx) SendStatus5(data RedisStatus5) error {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-
-	fields := map[string]interface{}{
-		"gear": data.Gear,
-	}
-
-	// Only set firmware fields if non-zero (avoids overwriting with 0 on startup)
-	if data.FirmwareVersion != 0 {
-		fields["fw-version"] = fmt.Sprintf("%08X", data.FirmwareVersion)
-		fields["motor:rated-power-kw"] = data.MotorRatedPowerKW
-		fields["motor:max-speed-kmh"] = data.MotorMaxSpeedKMH
-		fields["fw:base-version"] = data.SWBaseVersion
-		fields["fw:app-version"] = data.SWAppVersion
-	}
-
 	// Per-gear ratios are only meaningful once seen. Publishing zeros at
 	// boot would overwrite previously-cached values; skip the whole block
 	// when nothing has been reported yet.
-	if data.HighGearCurrent != 0 || data.MidGearCurrent != 0 || data.LowGearCurrent != 0 ||
-		data.HighGearTorque != 0 || data.MidGearTorque != 0 || data.LowGearTorque != 0 {
-		fields["gear:high-current-ratio"] = data.HighGearCurrent
-		fields["gear:mid-current-ratio"] = data.MidGearCurrent
-		fields["gear:low-current-ratio"] = data.LowGearCurrent
-		fields["gear:high-torque-ratio"] = data.HighGearTorque
-		fields["gear:mid-torque-ratio"] = data.MidGearTorque
-		fields["gear:low-torque-ratio"] = data.LowGearTorque
+	if s.HighGearCurrent != 0 || s.MidGearCurrent != 0 || s.LowGearCurrent != 0 ||
+		s.HighGearTorque != 0 || s.MidGearTorque != 0 || s.LowGearTorque != 0 {
+		fields["gear:high-current-ratio"] = s.HighGearCurrent
+		fields["gear:mid-current-ratio"] = s.MidGearCurrent
+		fields["gear:low-current-ratio"] = s.LowGearCurrent
+		fields["gear:high-torque-ratio"] = s.HighGearTorque
+		fields["gear:mid-torque-ratio"] = s.MidGearTorque
+		fields["gear:low-torque-ratio"] = s.LowGearTorque
 	}
 
-	if err := tx.redis.HSet(tx.ctx, "engine-ecu", fields).Err(); err != nil {
-		return fmt.Errorf("failed to send Status5: %v", err)
+	tx.last = s
+	tx.hasLast = true
+
+	if len(fields) == 0 {
+		return nil
 	}
 
-	return nil
+	_, err := tx.raw.HSet(tx.ctx, ecuHashKey, fields).Result()
+	return err
 }
 
-// SendECUConfig publishes the ECU's reported configuration values.
-// Each group of fields corresponds to a single CAN frame (or pair of
-// frames that arrive together). When a group has not been seen — its
-// canonical value is still zero — the fields are HDEL'd so callers
-// can distinguish "not reported" from a real zero reading.
-func (tx *IPCTx) SendECUConfig(data RedisECUConfig) error {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
+// SendECUConfig publishes the ECU's reported configuration values. Each group
+// of fields corresponds to a single CAN frame (or pair of frames that arrive
+// together). When a group has not been seen — its canonical value is still
+// zero — the fields are HDEL'd so callers can distinguish "not reported" from
+// a real zero reading. Without this, a field populated only by an infrequent
+// 0x4EF settings burst would otherwise show a misleading "0" for as long as
+// the bus stays busy enough that the comm-lost watcher never triggers 0x4EF.
+func (tx *IPCTx) SendECUConfig(c ECUConfigStatus) error {
+	pipe := tx.raw.Pipeline()
 
-	pipe := tx.redis.Pipeline()
-
-	// 0x7E9 + 0x7EA: over- and under-voltage thresholds arrive together
-	// in the 0x4EF settings burst.
+	// 0x7E9 + 0x7EA: over- and under-voltage thresholds arrive together in
+	// the 0x4EF settings burst.
 	voltageKeys := []string{"config:ov-threshold-mv", "config:uv-threshold-mv"}
-	if data.OverVoltageThresholdMV != 0 {
-		pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
-			"config:ov-threshold-mv": data.OverVoltageThresholdMV,
-			"config:uv-threshold-mv": data.UnderVoltageThresholdMV,
+	if c.OverVoltageThresholdMV != 0 {
+		pipe.HSet(tx.ctx, ecuHashKey, map[string]any{
+			"config:ov-threshold-mv": c.OverVoltageThresholdMV,
+			"config:uv-threshold-mv": c.UnderVoltageThresholdMV,
 		})
 	} else {
-		pipe.HDel(tx.ctx, "engine-ecu", voltageKeys...)
+		pipe.HDel(tx.ctx, ecuHashKey, voltageKeys...)
 	}
 
 	// 0x7EB: speed limit ratio
-	if data.SpeedLimitRatio != 0 {
-		pipe.HSet(tx.ctx, "engine-ecu", "config:speed-limit-ratio", data.SpeedLimitRatio)
+	if c.SpeedLimitRatio != 0 {
+		pipe.HSet(tx.ctx, ecuHashKey, "config:speed-limit-ratio", c.SpeedLimitRatio)
 	} else {
-		pipe.HDel(tx.ctx, "engine-ecu", "config:speed-limit-ratio")
+		pipe.HDel(tx.ctx, ecuHashKey, "config:speed-limit-ratio")
 	}
 
 	// 0x7EC: wheel circumference
-	if data.WheelCircumferenceCM != 0 {
-		pipe.HSet(tx.ctx, "engine-ecu", "config:wheel-circumference-cm", data.WheelCircumferenceCM)
+	if c.WheelCircumferenceCM != 0 {
+		pipe.HSet(tx.ctx, ecuHashKey, "config:wheel-circumference-cm", c.WheelCircumferenceCM)
 	} else {
-		pipe.HDel(tx.ctx, "engine-ecu", "config:wheel-circumference-cm")
+		pipe.HDel(tx.ctx, ecuHashKey, "config:wheel-circumference-cm")
 	}
 
 	// 0x7EE + 0x7EF: max and startup phase currents
 	phaseKeys := []string{"config:max-phase-current-ma", "config:startup-phase-current-ma"}
-	if data.MaxPhaseCurrentMA != 0 {
-		pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
-			"config:max-phase-current-ma":     data.MaxPhaseCurrentMA,
-			"config:startup-phase-current-ma": data.StartupPhaseCurrentMA,
+	if c.MaxPhaseCurrentMA != 0 {
+		pipe.HSet(tx.ctx, ecuHashKey, map[string]any{
+			"config:max-phase-current-ma":     c.MaxPhaseCurrentMA,
+			"config:startup-phase-current-ma": c.StartupPhaseCurrentMA,
 		})
 	} else {
-		pipe.HDel(tx.ctx, "engine-ecu", phaseKeys...)
+		pipe.HDel(tx.ctx, ecuHashKey, phaseKeys...)
 	}
-
-	// 0x7E5: EBS voltage and current — broadcast continuously while the
-	// ECU is up, so under normal operation this branch always HSETs.
-	ebsKeys := []string{"config:ebs-voltage-mv", "config:ebs-current-ma"}
-	if data.EBSVoltageMV != 0 {
-		pipe.HSet(tx.ctx, "engine-ecu", map[string]interface{}{
-			"config:ebs-voltage-mv": data.EBSVoltageMV,
-			"config:ebs-current-ma": data.EBSCurrentMA,
-		})
-	} else {
-		pipe.HDel(tx.ctx, "engine-ecu", ebsKeys...)
-	}
-
-	if _, err := pipe.Exec(tx.ctx); err != nil {
-		return fmt.Errorf("failed to send ECU config: %v", err)
-	}
-
-	return nil
-}
-
-func (tx *IPCTx) SendKersReasonOff(reason KersReasonOff) error {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-
-	pipe := tx.redis.Pipeline()
-
-	reasonStr := "none"
-	switch reason {
-	case KersReasonOffCold:
-		reasonStr = "cold"
-	case KersReasonOffHot:
-		reasonStr = "hot"
-	}
-
-	pipe.HSet(tx.ctx, "engine-ecu",
-		"kers-reason-off", reasonStr,
-	)
-
-	// Also publish KERS reason off changes
-	pipe.Publish(tx.ctx, "engine-ecu", "kers-reason-off")
 
 	_, err := pipe.Exec(tx.ctx)
-	if err != nil {
-		return fmt.Errorf("failed to send KERS reason off: %v", err)
-	}
+	return err
+}
 
-	return nil
+// PublishThrottle notifies subscribers that the throttle state changed.
+func (tx *IPCTx) PublishThrottle() error {
+	_, err := tx.client.Publish(throttleChannel, "")
+	return err
+}
+
+// PublishOdometer notifies subscribers that the odometer changed.
+func (tx *IPCTx) PublishOdometer() error {
+	_, err := tx.client.Publish(odometerChannel, "")
+	return err
+}
+
+// PublishKERS notifies subscribers that KERS enable state changed.
+func (tx *IPCTx) PublishKERS() error {
+	_, err := tx.client.Publish(kersChannel, "")
+	return err
+}
+
+// PublishKERSReasonOff notifies subscribers that the KERS-off reason changed.
+func (tx *IPCTx) PublishKERSReasonOff() error {
+	_, err := tx.client.Publish(kersReasonChan, "")
+	return err
+}
+
+// PublishRegen notifies subscribers that the derived regen availability or
+// reason changed.
+func (tx *IPCTx) PublishRegen() error {
+	_, err := tx.client.Publish(regenChannel, "")
+	return err
+}
+
+// SetFault overwrites the engine-ecu hash fault fields directly. The comm-lost
+// watchdog uses this to raise/clear E20 in the hash while no CAN frames are
+// arriving; tx.last is updated so the next SendStatus stays consistent.
+func (tx *IPCTx) SetFault(code uint32, desc string) error {
+	tx.mu.Lock()
+	tx.last.FaultCode = code
+	tx.last.FaultDesc = desc
+	tx.mu.Unlock()
+
+	_, err := tx.raw.HSet(tx.ctx, ecuHashKey, map[string]any{
+		"fault:code":        code,
+		"fault:description": desc,
+	}).Result()
+	return err
+}
+
+// ReportFault writes fault presence or absence to the fault set, event stream,
+// and notifies subscribers. An FaultNone fault clears the set.
+func (tx *IPCTx) ReportFault(fault Fault, cfg FaultConfig) error {
+	pipe := tx.raw.Pipeline()
+
+	if fault == FaultNone {
+		pipe.Del(tx.ctx, faultSetKey)
+		pipe.XAdd(tx.ctx, &redis.XAddArgs{
+			Stream: faultStreamKey,
+			MaxLen: faultStreamMax,
+			Values: map[string]any{"group": "engine-ecu", "code": 0},
+		})
+	} else {
+		pipe.SAdd(tx.ctx, faultSetKey, uint32(fault))
+		pipe.XAdd(tx.ctx, &redis.XAddArgs{
+			Stream: faultStreamKey,
+			MaxLen: faultStreamMax,
+			Values: map[string]any{
+				"group":       "engine-ecu",
+				"code":        uint32(fault),
+				"description": cfg.Description,
+				"severity":    cfg.Severity,
+			},
+		})
+	}
+	pipe.Publish(tx.ctx, ecuChannel, "fault")
+
+	_, err := pipe.Exec(tx.ctx)
+	return err
 }

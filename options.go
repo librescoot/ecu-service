@@ -1,9 +1,5 @@
 package main
 
-import (
-	"ecu-service/ecu"
-)
-
 type LogLevel int
 
 const (
@@ -16,10 +12,8 @@ const (
 
 type Options struct {
 	LogLevel        LogLevel
-	RedisServerAddr string
-	RedisServerPort uint16
+	RedisServer     string
+	RedisPort       int
 	CANDevice       string
-	ECUType         ecu.ECUType
-	Logger          *LeveledLogger
 	GearRatioValues []uint8
 }

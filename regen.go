@@ -2,9 +2,6 @@ package main
 
 // Regen-availability model. All constants below are empirically derived and
 // expressed in the ECU's internal FOC current-command counts unless noted.
-// The envelope constants are Bosch-specific; on other controllers the accepted
-// caps read 0 and the model degrades to gating-only (motor:current remains the
-// real-measurement source for the actual regen fill).
 const (
 	// regenCeilingCounts is the absolute regen-current command ceiling.
 	regenCeilingCounts = 5719
@@ -35,16 +32,15 @@ type RegenState struct {
 }
 
 // computeRegen derives the regen envelope from the accepted EBS caps, the live
-// pack voltage, wheel speed and the KERS arm state/reason. armReason is
-// "none"/"cold"/"hot". wheelRPM is the ECU-reported wheel speed. vMaxMV/iMaxMA
-// are the accepted caps echoed by the ECU (0 until the first EBS Status frame,
-// or when the controller does not report them).
-func computeRegen(enabled bool, armReason string, wheelRPM, vPackMV, vMaxMV, iMaxMA int) RegenState {
+// pack voltage, wheel speed and the KERS arm state and its reason. wheelRPM is
+// the ECU-reported wheel speed. vMaxMV/iMaxMA are the accepted caps echoed by
+// the ECU (0 until the first EBS Status frame).
+func computeRegen(enabled bool, armReason KERSReason, wheelRPM, vPackMV, vMaxMV, iMaxMA int) RegenState {
 	// Temperature gating disarms KERS outright.
 	switch armReason {
-	case "cold":
+	case KERSReasonCold:
 		return RegenState{Available: false, Reason: "cold"}
-	case "hot":
+	case KERSReasonHot:
 		return RegenState{Available: false, Reason: "hot"}
 	}
 	// Not armed (user-disabled or not yet ready to drive).
@@ -56,8 +52,8 @@ func computeRegen(enabled bool, armReason string, wheelRPM, vPackMV, vMaxMV, iMa
 	if wheelRPM < regenEngageMinWheelRPM {
 		return RegenState{Available: false, Reason: "standstill"}
 	}
-	// No accepted caps (no EBS Status frame, or controller doesn't report
-	// them) — assume available rather than flag a limit we can't assess.
+	// No accepted caps yet (no EBS Status frame seen) — assume available
+	// rather than falsely flag a limit we can't assess.
 	if vMaxMV <= 0 || iMaxMA <= 0 {
 		return RegenState{Available: true, Reason: "none"}
 	}
