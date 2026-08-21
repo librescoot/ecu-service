@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"time"
-
-	ipc "github.com/librescoot/redis-ipc"
 )
 
 const (
@@ -25,10 +23,17 @@ const (
 // CommLostWatcher raises fault E20 when the ECU should be alive and powered but
 // hasn't sent a CAN frame within commLostRaiseAfter. It is gated on vehicle
 // engine-power && main-power (so it stays quiet during standby or when 48V is
-// down), on a power-on grace window, and on the ECU reporting non-zero speed
-// (so a parked-but-powered ECU doesn't flag).
+// down) and on a power-on grace window. It is deliberately NOT gated on wheel
+// speed: at standstill the ECU sends nothing, so a powered-but-silent ECU must
+// still raise/clear E20 or the feed would never recover.
+// vehicleHashReader is the minimal read surface CommLostWatcher needs from the
+// vehicle Redis hash. *ipc.Client satisfies it; tests inject an in-memory fake.
+type vehicleHashReader interface {
+	HGetAll(key string) (map[string]string, error)
+}
+
 type CommLostWatcher struct {
-	ipc      *ipc.Client
+	ipc      vehicleHashReader
 	ecu      *ECU
 	log      *Logger
 	onChange func(raise bool)
@@ -38,7 +43,7 @@ type CommLostWatcher struct {
 	powerOnEdge    time.Time
 }
 
-func newCommLostWatcher(client *ipc.Client, ecu *ECU, log *Logger, onChange func(bool)) *CommLostWatcher {
+func newCommLostWatcher(client vehicleHashReader, ecu *ECU, log *Logger, onChange func(bool)) *CommLostWatcher {
 	return &CommLostWatcher{ipc: client, ecu: ecu, log: log, onChange: onChange}
 }
 
@@ -87,6 +92,12 @@ func (w *CommLostWatcher) check() {
 		}
 	}
 	stale := frameAge > commLostRaiseAfter
+	// Comm-loss is only flagged while moving. The ECU pushes no frames at standstill
+	// (normal), so a parked-but-powered ECU being silent is expected and must NOT raise
+	// E20 (a false alarm). While driving, an expected-alive, powered ECU that has been
+	// silent for >= commLostRaiseAfter is truly comm-lost and must flag so the live
+	// feed recovers. The ecuPowered && !inGrace gates prevent spurious E20 on genuine
+	// shutdown or during the power-on grace window.
 	moving := w.ecu.Speed() != 0
 	shouldRaise := stale && ecuPowered && !inGrace && moving
 

@@ -606,13 +606,16 @@ func (b *ECU) RequestStatus() {
 	}
 }
 
-// UpdateBus replaces the CAN bus reference after a reconnect and resets the
-// stale-frame clock so control frames go out on the fresh socket.
+// UpdateBus replaces the CAN bus reference after a reconnect so control frames go out
+// on the fresh socket. It deliberately does NOT rewrite lastFrameTime: only actual
+// frame reception (HandleFrame) may advance the freshness clock. Resetting it here on
+// every reconnect would mask a genuine no-frame interval while a non-responsive ECU stays
+// silent mid-drive, so the comm-lost watchdog (CommLostWatcher) would never see
+// staleness and E20 would never raise to re-arm recovery.
 func (b *ECU) UpdateBus(bus *can.Bus) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.bus = bus
-	b.lastFrameTime = time.Now()
 }
 
 // IsStale returns true if no CAN frame has been received within staleTimeout.
