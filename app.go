@@ -133,6 +133,9 @@ func (a *App) onCommLostChange(raise bool) {
 	if err := a.ipcTx.ReportFault(fault, cfg); err != nil {
 		a.log.Error("ReportFault clear: %v", err)
 	}
+	// Reset SendStatus change-tracking so the live values that were frozen behind the
+	// synthetic E20 republish as soon as frames resume.
+	a.ipcTx.ResetTracking()
 }
 
 func (a *App) Run(ctx context.Context) error {

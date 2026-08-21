@@ -273,8 +273,19 @@ func (tx *IPCTx) PublishRegen() error {
 	return err
 }
 
-// SetFault overwrites the engine-ecu hash fault fields directly. The comm-lost
-// watchdog uses this to raise/clear E20 in the hash while no CAN frames are
+// ResetTracking drops the last-seen status baseline so the next SendStatus is
+// treated as a fresh baseline and republishes every live field. The comm-lost
+// watchdog calls this when E20 clears after a comm stall: values frozen while the
+// bus was silent must be republished once frames resume, even if they are unchanged
+// from the pre-stall reading. A single full republish after recovery is not a storm;
+// change-tracking resumes immediately after.
+func (tx *IPCTx) ResetTracking() {
+	tx.mu.Lock()
+	tx.hasLast = false
+	tx.mu.Unlock()
+}
+
+// SetFault overwrites the engine-ecu hash fault fields directly. The comm-lost// watchdog uses this to raise/clear E20 in the hash while no CAN frames are
 // arriving; tx.last is updated so the next SendStatus stays consistent.
 func (tx *IPCTx) SetFault(code uint32, desc string) error {
 	tx.mu.Lock()
