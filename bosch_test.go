@@ -603,6 +603,40 @@ func TestHandleFrame_ReceivingProvesPower(t *testing.T) {
 	}
 }
 
+func TestHandleFrame_PowerUpEdgeReappliesCommandedState(t *testing.T) {
+	ecu, bus := newGatedECU()
+
+	// Commanded while dark, so dropped.
+	ecu.SetBoostEnabled(true)
+	if len(bus.sent) != 0 {
+		t.Fatalf("unpowered ECU sent %d frame(s): %#x", len(bus.sent), bus.ids())
+	}
+
+	// The ECU starts talking before the watchdog's next poll. If this path just
+	// set the flag, SetPowered(true) would later see no change and never re-send,
+	// leaving the ECU without the boost state for good.
+	ecu.HandleFrame(makeFrame(frameStatus1, []byte{0, 0, 0, 0, 0, 0, 0, 0}))
+
+	ids := bus.ids()
+	if len(ids) == 0 {
+		t.Fatal("first frame did not re-apply the state commanded while dark")
+	}
+	ctrl := bus.sent[len(bus.sent)-1]
+	if ctrl.ID != frameControl {
+		t.Fatalf("expected a Control frame, got %#x", ids)
+	}
+	if ctrl.Data[0]&0x02 == 0 {
+		t.Error("Control frame does not carry the boost bit commanded while dark")
+	}
+
+	// And the watchdog catching up must not send it a second time.
+	n := len(bus.sent)
+	ecu.SetPowered(true)
+	if len(bus.sent) != n {
+		t.Errorf("watchdog re-sent after the frame edge already did: %#x", bus.ids())
+	}
+}
+
 func TestSetKersCurrent_CachedValueLandsInEBSFrameOnEnable(t *testing.T) {
 	ecu, bus := newGatedECU()
 	ecu.SetPowered(true)

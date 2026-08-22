@@ -214,8 +214,14 @@ func (b *ECU) HandleFrame(frame can.Frame) {
 
 	b.lastFrameTime = time.Now()
 	// Hearing from the ECU is proof it has power, and is quicker than waiting
-	// for the watchdog's next read of the vehicle hash.
-	b.powered = true
+	// for the watchdog's next read of the vehicle hash. Go through the same edge
+	// handling, or anything commanded while the ECU was dark stays dropped: the
+	// watchdog's later SetPowered(true) would see no change and skip the re-send.
+	if !b.powered {
+		b.powered = true
+		b.log.Info("ECU power: true (first frame)")
+		b.sendKersStateLocked()
+	}
 
 	switch frame.ID {
 	case frameStatus1:
@@ -526,6 +532,9 @@ func (b *ECU) updatePower() {
 
 // publish sends a frame only while the ECU has power. Callers hold b.mu.
 func (b *ECU) publish(frame can.Frame, what string) error {
+	if b.bus == nil {
+		return nil
+	}
 	if !b.powered {
 		b.log.Debug("ECU unpowered, dropping %s frame", what)
 		return nil
