@@ -151,7 +151,7 @@ type ECU struct {
 	// only supplied in parked and ready-to-drive; frames sent while it is dark
 	// are never acknowledged, and enough unacknowledged frames walk the TX error
 	// counter up to 256 and latch the controller bus-off.
-	powered              bool
+	powered bool
 
 	// Status bits reported by the ECU (paired enable/disable flags, Status4)
 	ecuStatusEnabled bool
