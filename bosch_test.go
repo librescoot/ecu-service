@@ -481,3 +481,163 @@ func TestMapFault_Zero(t *testing.T) {
 		t.Errorf("zero should map to FaultNone, got %d", f)
 	}
 }
+
+// --- ECU power gating ---
+//
+// The ECU is only supplied in parked and ready-to-drive. Frames sent while it is
+// dark are never acknowledged, and enough of them latch the CAN controller
+// bus-off, so nothing may go on the wire until power is confirmed.
+
+// fakeBus records the frames the ECU tries to send.
+type fakeBus struct {
+	sent []can.Frame
+	err  error
+}
+
+func (f *fakeBus) Publish(frame can.Frame) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.sent = append(f.sent, frame)
+	return nil
+}
+
+func (f *fakeBus) ids() []uint32 {
+	out := make([]uint32, len(f.sent))
+	for i, fr := range f.sent {
+		out[i] = fr.ID
+	}
+	return out
+}
+
+// newGatedECU returns an ECU wired to a fakeBus, unpowered.
+func newGatedECU() (*ECU, *fakeBus) {
+	bus := &fakeBus{}
+	return &ECU{log: newLogger(LogLevelNone), bus: bus, kersVoltage: DefaultKersVoltage}, bus
+}
+
+func TestPublish_DropsFrameWhileUnpowered(t *testing.T) {
+	ecu, bus := newGatedECU()
+
+	ecu.RequestStatus()
+
+	if len(bus.sent) != 0 {
+		t.Fatalf("unpowered ECU sent %d frame(s): %#x", len(bus.sent), bus.ids())
+	}
+}
+
+func TestPublish_SendsFrameWhenPowered(t *testing.T) {
+	ecu, bus := newGatedECU()
+	ecu.SetPowered(true)
+	bus.sent = nil // discard the power-up KERS re-apply
+
+	ecu.RequestStatus()
+
+	if len(bus.sent) != 1 || bus.sent[0].ID != frameStatusReq {
+		t.Fatalf("expected one 0x%X frame, got %#x", frameStatusReq, bus.ids())
+	}
+}
+
+func TestSetKersEnabled_DroppedWhileUnpoweredThenReappliedOnPowerUp(t *testing.T) {
+	ecu, bus := newGatedECU()
+
+	// Commanded while the ECU is dark: recorded, but nothing on the wire.
+	ecu.SetKersEnabled(true)
+	if len(bus.sent) != 0 {
+		t.Fatalf("unpowered ECU sent %d frame(s): %#x", len(bus.sent), bus.ids())
+	}
+	if !ecu.kersActive {
+		t.Fatal("commanded KERS state was not recorded while unpowered")
+	}
+
+	// Power arrives: the commanded state goes out without the caller re-asking,
+	// since frames are dropped rather than queued.
+	ecu.SetPowered(true)
+
+	ids := bus.ids()
+	if len(ids) != 2 || ids[0] != frameEBSSet || ids[1] != frameControl {
+		t.Fatalf("expected EBS Set then Control on power-up, got %#x", ids)
+	}
+	if ids := bus.sent[1].Data[0] & 0x04; ids == 0 {
+		t.Error("Control frame does not carry the KERS-enabled bit")
+	}
+}
+
+func TestSetPowered_DoesNotReapplyOnPowerDown(t *testing.T) {
+	ecu, bus := newGatedECU()
+	ecu.SetPowered(true)
+	bus.sent = nil
+
+	ecu.SetPowered(false)
+
+	if len(bus.sent) != 0 {
+		t.Fatalf("power-down sent %d frame(s): %#x", len(bus.sent), bus.ids())
+	}
+}
+
+func TestSetPowered_IgnoresRepeatedSameState(t *testing.T) {
+	ecu, bus := newGatedECU()
+	ecu.kersActive = true
+	ecu.SetPowered(true)
+	first := len(bus.sent)
+
+	ecu.SetPowered(true) // watchdog polls every 500ms; only edges matter
+
+	if len(bus.sent) != first {
+		t.Fatalf("repeated SetPowered(true) re-sent frames: %#x", bus.ids())
+	}
+}
+
+func TestHandleFrame_ReceivingProvesPower(t *testing.T) {
+	ecu, _ := newGatedECU()
+	if ecu.powered {
+		t.Fatal("ECU should start unpowered")
+	}
+
+	// A Status1 frame can only come from a powered ECU, and trusting it beats
+	// waiting up to 500ms for the watchdog's next read of the vehicle hash.
+	ecu.HandleFrame(makeFrame(frameStatus1, []byte{0, 0, 0, 0, 0, 0, 0, 0}))
+
+	if !ecu.powered {
+		t.Error("receiving a frame did not mark the ECU powered")
+	}
+}
+
+func TestSetKersCurrent_CachedValueLandsInEBSFrameOnEnable(t *testing.T) {
+	ecu, bus := newGatedECU()
+	ecu.SetPowered(true)
+	bus.sent = nil
+
+	// Regen settings only cache; they reach the ECU in the EBS Set frame that
+	// accompanies the next enable.
+	ecu.SetKersCurrent(20000)
+	ecu.SetKersVoltage(54000)
+	if len(bus.sent) != 0 {
+		t.Fatalf("regen setters transmitted on their own: %#x", bus.ids())
+	}
+
+	ecu.SetKersEnabled(true)
+
+	if len(bus.sent) == 0 || bus.sent[0].ID != frameEBSSet {
+		t.Fatalf("expected an EBS Set frame first, got %#x", bus.ids())
+	}
+	gotV := binary.BigEndian.Uint16(bus.sent[0].Data[0:2])
+	gotI := binary.BigEndian.Uint16(bus.sent[0].Data[2:4])
+	if gotV != 54000/10 || gotI != 20000/10 {
+		t.Errorf("EBS Set carried voltage=%d current=%d, want %d/%d",
+			gotV, gotI, 54000/10, 20000/10)
+	}
+}
+
+func TestSetGear_DroppedWhileUnpowered(t *testing.T) {
+	ecu, bus := newGatedECU()
+	ecu.gearRatioValues = []uint8{10, 20, 30}
+
+	if err := ecu.SetGear(2); err != nil {
+		t.Fatalf("SetGear returned %v", err)
+	}
+
+	if len(bus.sent) != 0 {
+		t.Fatalf("unpowered ECU sent a gear frame: %#x", bus.ids())
+	}
+}

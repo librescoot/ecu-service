@@ -115,8 +115,9 @@ type ConfigReport struct {
 type ECU struct {
 	mu sync.RWMutex
 
-	// CAN bus for sending control frames.
-	bus *can.Bus
+	// CAN bus for sending control frames. An interface rather than *can.Bus so
+	// tests can capture what would go on the wire.
+	bus canPublisher
 
 	log *Logger
 
@@ -189,6 +190,11 @@ type ECU struct {
 	lastFrameTime time.Time
 
 	speedBuf speedBuffer
+}
+
+// canPublisher is the part of *can.Bus the ECU uses.
+type canPublisher interface {
+	Publish(can.Frame) error
 }
 
 func newECU(bus *can.Bus, log *Logger, gearRatioValues []uint8) *ECU {
