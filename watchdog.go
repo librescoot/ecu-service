@@ -65,6 +65,11 @@ func (w *CommLostWatcher) check() {
 	// ECU is expected to talk iff vehicle-service commanded engine-power ON and
 	// the battery supplies the 48V rail (main-power ON). Both must hold.
 	ecuPowered := fields["engine-power"] == "on" && fields["main-power"] == "on"
+	// This is the only place that reads the power fields, so it also tells the
+	// ECU whether it may transmit at all. Without that, the CAN reconnect loop
+	// and the KERS setters would keep talking to an unpowered ECU, and the
+	// unacknowledged frames eventually latch the controller bus-off.
+	w.ecu.SetPowered(ecuPowered)
 
 	now := time.Now()
 	if ecuPowered && !w.prevEcuPowered {

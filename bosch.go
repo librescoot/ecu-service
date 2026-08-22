@@ -146,6 +146,11 @@ type ECU struct {
 	firmwareVersion      uint32
 	warrantyDate         uint32
 	gearsSentOnPower     bool // whether gearRatioValues have been sent since the ECU last powered on
+	// powered mirrors vehicle[engine-power] && vehicle[main-power]. The ECU is
+	// only supplied in parked and ready-to-drive; frames sent while it is dark
+	// are never acknowledged, and enough unacknowledged frames walk the TX error
+	// counter up to 256 and latch the controller bus-off.
+	powered              bool
 
 	// Status bits reported by the ECU (paired enable/disable flags, Status4)
 	ecuStatusEnabled bool
@@ -202,6 +207,9 @@ func (b *ECU) HandleFrame(frame can.Frame) {
 	defer b.mu.Unlock()
 
 	b.lastFrameTime = time.Now()
+	// Hearing from the ECU is proof it has power, and is quicker than waiting
+	// for the watchdog's next read of the vehicle hash.
+	b.powered = true
 
 	switch frame.ID {
 	case frameStatus1:
@@ -258,7 +266,7 @@ func (b *ECU) handleStatus1(frame can.Frame) {
 			gear := uint8(i + 1)
 			gearFrame := can.Frame{ID: frameGearControl, Length: 1}
 			gearFrame.Data[0] = ratio
-			if err := b.bus.Publish(gearFrame); err != nil {
+			if err := b.publish(gearFrame, "gear"); err != nil {
 				b.log.Error("Failed to send gear %d on power-up: %v", gear, err)
 			} else {
 				b.log.Debug("Sent gear %d (ratio: %d) on ECU power-up", gear, ratio)
@@ -510,20 +518,42 @@ func (b *ECU) updatePower() {
 	}
 }
 
-// SetKersEnabled commands KERS on/off. Sends Control frame (0x4E0) and, when
-// enabling, the EBS Set frame (0x4E2) to configure regen voltage/current.
-func (b *ECU) SetKersEnabled(enabled bool) {
+// publish sends a frame only while the ECU has power. Callers hold b.mu.
+func (b *ECU) publish(frame can.Frame, what string) error {
+	if !b.powered {
+		b.log.Debug("ECU unpowered, dropping %s frame", what)
+		return nil
+	}
+	return b.bus.Publish(frame)
+}
+
+// SetPowered records whether the ECU is supplied, as seen in the vehicle hash.
+// Frames raised while it was dark were dropped rather than queued, so the
+// commanded KERS state is re-sent on the dark-to-powered edge. Receiving a frame
+// also proves power and sets this directly, which beats waiting for the next
+// watchdog poll.
+func (b *ECU) SetPowered(powered bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if powered == b.powered {
+		return
+	}
+	b.powered = powered
+	b.log.Info("ECU power: %v", powered)
+	if powered {
+		b.sendKersStateLocked()
+	}
+}
 
-	b.log.Info("KERS → %v (boost=%v)", enabled, b.boostEnabled)
-
-	if enabled {
+// sendKersStateLocked emits the frames that carry the currently commanded KERS
+// state. Callers hold b.mu.
+func (b *ECU) sendKersStateLocked() {
+	if b.kersActive {
 		ebs := can.Frame{ID: frameEBSSet, Length: 4}
 		binary.BigEndian.PutUint16(ebs.Data[0:2], b.kersVoltage/10)
 		binary.BigEndian.PutUint16(ebs.Data[2:4], b.kersCurrent/10)
 		b.log.DebugCAN("TX", ebs.ID, ebs.Data, ebs.Length)
-		if err := b.bus.Publish(ebs); err != nil {
+		if err := b.publish(ebs, "EBS Set"); err != nil {
 			b.log.Error("Failed to send EBS Set frame: %v", err)
 		}
 	}
@@ -531,13 +561,22 @@ func (b *ECU) SetKersEnabled(enabled bool) {
 	ctrl := can.Frame{ID: frameControl, Length: 1}
 	ctrl.Data[0] = 0x01 | // gear mode always enabled (bit 0)
 		boolBit(b.boostEnabled, 1) |
-		boolBit(enabled, 2)
+		boolBit(b.kersActive, 2)
 	b.log.DebugCAN("TX", ctrl.ID, ctrl.Data, ctrl.Length)
-	if err := b.bus.Publish(ctrl); err != nil {
+	if err := b.publish(ctrl, "Control"); err != nil {
 		b.log.Error("Failed to send Control frame: %v", err)
 	}
+}
 
+// SetKersEnabled commands KERS on/off. Sends Control frame (0x4E0) and, when
+// enabling, the EBS Set frame (0x4E2) to configure regen voltage/current.
+func (b *ECU) SetKersEnabled(enabled bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.log.Info("KERS: %v (boost=%v)", enabled, b.boostEnabled)
 	b.kersActive = enabled
+	b.sendKersStateLocked()
 }
 
 // SetBoostEnabled updates the boost flag and sends an updated Control frame.
@@ -553,7 +592,7 @@ func (b *ECU) SetBoostEnabled(enabled bool) {
 		boolBit(enabled, 1) |
 		boolBit(b.kersActive, 2)
 	b.log.DebugCAN("TX", ctrl.ID, ctrl.Data, ctrl.Length)
-	if err := b.bus.Publish(ctrl); err != nil {
+	if err := b.publish(ctrl, "Control"); err != nil {
 		b.log.Error("Failed to send Control frame: %v", err)
 	}
 }
@@ -601,7 +640,7 @@ func (b *ECU) RequestStatus() {
 
 	frame := can.Frame{ID: frameStatusReq, Length: 0}
 	b.log.DebugCAN("TX", frame.ID, frame.Data, frame.Length)
-	if err := b.bus.Publish(frame); err != nil {
+	if err := b.publish(frame, "status request"); err != nil {
 		b.log.Error("Failed to send status request: %v", err)
 	}
 }
@@ -792,7 +831,7 @@ func (b *ECU) SetGear(gear uint8) error {
 	gearFrame := can.Frame{ID: frameGearControl, Length: 1}
 	gearFrame.Data[0] = ratio
 
-	return b.bus.Publish(gearFrame)
+	return b.publish(gearFrame, "gear")
 }
 func (b *ECU) Power() int {
 	b.mu.RLock()
