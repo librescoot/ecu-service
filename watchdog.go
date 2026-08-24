@@ -10,8 +10,11 @@ import (
 const (
 	commLostTick = 500 * time.Millisecond
 	// commLostPollAfter: prod the ECU with 0x4EF only once we haven't heard from
-	// it this long. While driving the ECU pushes Status frames at ~5 Hz on its
-	// own; idle in ready-to-drive drops below the raise threshold, so poll there.
+	// it this long. Once up, a powered ECU broadcasts Status frames unprompted
+	// on its own regardless of speed (measured on-vehicle: continuous Status1 /
+	// Status3 traffic with the scooter stationary, no further polling needed
+	// once the first frame arrived); this poll only covers the gap between
+	// power-on and that first frame.
 	commLostPollAfter = 700 * time.Millisecond
 	// commLostRaiseAfter is deliberately longer than pollAfter + worst-case ECU
 	// reply latency (the 0x7E0-0x7E8 burst is spread over ~1s), so a fresh poll's
@@ -25,8 +28,11 @@ const (
 // CommLostWatcher raises fault E20 when the ECU should be alive and powered but
 // hasn't sent a CAN frame within commLostRaiseAfter. It is gated on vehicle
 // engine-power && main-power (so it stays quiet during standby or when 48V is
-// down), on a power-on grace window, and on the ECU reporting non-zero speed
-// (so a parked-but-powered ECU doesn't flag).
+// down) and on a power-on grace window. It does not gate on speed: once up, a
+// powered ECU broadcasts Status frames unprompted whether or not it is moving
+// (measured on-vehicle), so frame staleness on its own is a sound signal and a
+// parked-but-powered ECU never raises the fault. The 0x4EF poll only covers the
+// gap before the first broadcast. Gating on speed hid a dead bus at standstill.
 type CommLostWatcher struct {
 	ipc      *ipc.Client
 	ecu      *ECU
@@ -71,6 +77,25 @@ func (w *CommLostWatcher) check() {
 	// unacknowledged frames eventually latch the controller bus-off.
 	w.ecu.SetPowered(ecuPowered)
 
+	shouldRaise := w.evaluate(ecuPowered)
+
+	switch {
+	case shouldRaise && !w.published:
+		w.published = true
+		w.log.Warn("ECU communication lost (>%v) in state=%s, publishing E20", commLostRaiseAfter, state)
+		w.onChange(true)
+	case !shouldRaise && w.published:
+		w.published = false
+		w.log.Info("E20 cleared")
+		w.onChange(false)
+	}
+}
+
+// evaluate applies the power/staleness state to decide whether E20 should be
+// raised, polling the ECU (0x4EF) if we're overdue and tracking the power-on
+// grace edge along the way. Split out from check() so the decision itself can
+// be tested without a live IPC connection.
+func (w *CommLostWatcher) evaluate(ecuPowered bool) bool {
 	now := time.Now()
 	if ecuPowered && !w.prevEcuPowered {
 		w.powerOnEdge = now
@@ -92,17 +117,5 @@ func (w *CommLostWatcher) check() {
 		}
 	}
 	stale := frameAge > commLostRaiseAfter
-	moving := w.ecu.Speed() != 0
-	shouldRaise := stale && ecuPowered && !inGrace && moving
-
-	switch {
-	case shouldRaise && !w.published:
-		w.published = true
-		w.log.Warn("ECU communication lost (>%v) in state=%s, publishing E20", commLostRaiseAfter, state)
-		w.onChange(true)
-	case !shouldRaise && w.published:
-		w.published = false
-		w.log.Info("E20 cleared")
-		w.onChange(false)
-	}
+	return stale && ecuPowered && !inGrace
 }
