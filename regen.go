@@ -21,6 +21,10 @@ const (
 	// Empirically the engage/disengage deadband sits right at this reported
 	// wheel-RPM value; ~90 RPM is ~7 km/h.
 	regenEngageMinWheelRPM = 90
+	// regenObservedCurrentThresholdMA rejects small negative current-sensor
+	// noise while still treating measured charging current as authoritative
+	// evidence that the ECU is recuperating.
+	regenObservedCurrentThresholdMA = 200
 )
 
 // RegenState is the derived view of whether regen is available, why not, and
@@ -32,10 +36,10 @@ type RegenState struct {
 }
 
 // computeRegen derives the regen envelope from the accepted EBS caps, the live
-// pack voltage, wheel speed and the KERS arm state and its reason. wheelRPM is
-// the ECU-reported wheel speed. vMaxMV/iMaxMA are the accepted caps echoed by
-// the ECU (0 until the first EBS Status frame).
-func computeRegen(enabled bool, armReason KERSReason, wheelRPM, vPackMV, vMaxMV, iMaxMA int) RegenState {
+// pack voltage, wheel speed and the KERS policy state and its reason. wheelRPM
+// is the ECU-reported wheel speed. vMaxMV/iMaxMA are the accepted caps echoed
+// by the ECU (0 until the first EBS Status frame).
+func computeRegen(policyAllows bool, armReason KERSReason, wheelRPM, vPackMV, vMaxMV, iMaxMA int) RegenState {
 	// Temperature gating disarms KERS outright.
 	switch armReason {
 	case KERSReasonCold:
@@ -43,8 +47,8 @@ func computeRegen(enabled bool, armReason KERSReason, wheelRPM, vPackMV, vMaxMV,
 	case KERSReasonHot:
 		return RegenState{Available: false, Reason: "hot"}
 	}
-	// Not armed (user-disabled or not yet ready to drive).
-	if !enabled {
+	// Policy does not allow KERS (user-disabled or not yet ready to drive).
+	if !policyAllows {
 		return RegenState{Available: false, Reason: "off"}
 	}
 	// Near standstill the ECU falls below its regen engage-speed deadband and
@@ -86,4 +90,17 @@ func computeRegen(enabled bool, armReason KERSReason, wheelRPM, vPackMV, vMaxMV,
 		return RegenState{Available: false, Reason: "full"}
 	}
 	return RegenState{Available: true, Reason: "none", ExpectedMA: envelope * regenCountToMA}
+}
+
+// applyObservedRegen lets measured charging current override the predictive
+// availability model. The model intentionally starts from the service's KERS
+// policy command and emulates the ECU's known speed/voltage gates, but the ECU
+// has additional internal state that is not exposed on CAN. Negative current in
+// Status1 is therefore the ground truth that regen is actually happening.
+func applyObservedRegen(predicted RegenState, motorCurrentMA int) RegenState {
+	if motorCurrentMA <= -regenObservedCurrentThresholdMA {
+		predicted.Available = true
+		predicted.Reason = "none"
+	}
+	return predicted
 }

@@ -747,7 +747,9 @@ func (b *ECU) Odometer() uint32 {
 	defer b.mu.RUnlock()
 	return b.odometer
 }
-func (b *ECU) KersActive() bool {
+
+// KersPolicyEnabled returns the KERS allow state last commanded by the service.
+func (b *ECU) KersPolicyEnabled() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.kersActive

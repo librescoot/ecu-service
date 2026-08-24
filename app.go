@@ -221,6 +221,15 @@ func (h *appHandler) Handle(frame can.Frame) {
 	a.onFrame()
 }
 
+func (a *App) regenState(s Status) RegenState {
+	// Predict availability from the KERS policy we commanded, then apply the
+	// ECU's known speed and voltage gates. Status4 is an event-driven snapshot,
+	// so retaining it in s.KersActive is useful for diagnostics and
+	// reconciliation but it must not gate the live prediction.
+	regen := computeRegen(a.ecu.KersPolicyEnabled(), a.lastKersReason, int(s.RPM), s.Voltage, s.AcceptedRegenVoltage, s.AcceptedRegenCurrent)
+	return applyObservedRegen(regen, s.Current)
+}
+
 func (a *App) onFrame() {
 	ratios := a.ecu.GearRatios()
 	sw := a.ecu.SoftwareVersion()
@@ -266,7 +275,7 @@ func (a *App) onFrame() {
 		s.FaultDesc = cfg.Description
 	}
 
-	regen := computeRegen(s.KersActive, a.lastKersReason, int(s.RPM), s.Voltage, s.AcceptedRegenVoltage, s.AcceptedRegenCurrent)
+	regen := a.regenState(s)
 	s.RegenAvailable = regen.Available
 	s.RegenReason = regen.Reason
 	s.RegenExpected = regen.ExpectedMA
