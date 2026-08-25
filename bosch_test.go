@@ -635,18 +635,66 @@ func TestSetPowered_IgnoresRepeatedSameState(t *testing.T) {
 	}
 }
 
-func TestHandleFrame_ReceivingProvesPower(t *testing.T) {
+// TestHandleFrame_DoesNotWriteThePowerCommand separates the two facts that used
+// to share one flag. A frame is evidence the controller is alive; it is not
+// vehicle-service telling us the rail is up, and it must never be recorded as
+// such.
+func TestHandleFrame_DoesNotWriteThePowerCommand(t *testing.T) {
 	ecu, _ := newGatedECU()
-	if ecu.powered {
-		t.Fatal("ECU should start unpowered")
+	if ecu.powerCmd != powerUnknown {
+		t.Fatal("a fresh ECU should have no power command yet")
 	}
 
-	// A Status1 frame can only come from a powered ECU, and trusting it beats
-	// waiting up to 500ms for the watchdog's next read of the vehicle hash.
 	ecu.HandleFrame(makeFrame(frameStatus1, []byte{0, 0, 0, 0, 0, 0, 0, 0}))
 
-	if !ecu.powered {
-		t.Error("receiving a frame did not mark the ECU powered")
+	if ecu.powerCmd != powerUnknown {
+		t.Errorf("a received frame wrote the power command: %s", ecu.powerCmd)
+	}
+}
+
+// TestHandleFrame_CannotReopenACommandedOffGate is the regression case. When the
+// rail is cut, frames already in flight arrive after the command says off. They
+// used to flip the gate back open, and the watchdog closed it again on its next
+// tick, so the pair oscillated at 2Hz and transmitted into a controller that was
+// losing supply on every flip.
+func TestHandleFrame_CannotReopenACommandedOffGate(t *testing.T) {
+	ecu, bus := newGatedECU()
+	ecu.SetPowered(true)
+	ecu.SetBoostEnabled(true)
+	ecu.SetPowered(false)
+	bus.sent = nil
+
+	// Ten frames still on the wire from the collapsing controller.
+	for i := 0; i < 10; i++ {
+		ecu.HandleFrame(makeFrame(frameStatus1, []byte{0, 0, 0, 0, 0, 0, 0, 0}))
+	}
+
+	if len(bus.sent) != 0 {
+		t.Fatalf("in-flight frames caused %d transmission(s) into a commanded-off ECU: %#x", len(bus.sent), bus.ids())
+	}
+	if ecu.powerCmd != powerOff {
+		t.Errorf("in-flight frames moved the power command to %s", ecu.powerCmd)
+	}
+}
+
+// TestSetPowered_OffThenOnReappliesState covers the other half: state commanded
+// while the rail was down must be re-applied when it comes back, because the
+// controller comes up with none of it.
+func TestSetPowered_OffThenOnReappliesState(t *testing.T) {
+	ecu, bus := newGatedECU()
+	ecu.SetPowered(true)
+	ecu.SetBoostEnabled(true)
+	ecu.SetPowered(false)
+	bus.sent = nil
+
+	ecu.SetPowered(true)
+
+	if len(bus.sent) == 0 {
+		t.Fatal("power returning did not re-apply the commanded state")
+	}
+	ctrl := bus.sent[len(bus.sent)-1]
+	if ctrl.ID != frameControl || ctrl.Data[0]&0x02 == 0 {
+		t.Errorf("re-applied frame does not carry the commanded boost bit: %#x", bus.ids())
 	}
 }
 
@@ -659,9 +707,10 @@ func TestHandleFrame_PowerUpEdgeReappliesCommandedState(t *testing.T) {
 		t.Fatalf("unpowered ECU sent %d frame(s): %#x", len(bus.sent), bus.ids())
 	}
 
-	// The ECU starts talking before the watchdog's next poll. If this path just
-	// set the flag, SetPowered(true) would later see no change and never re-send,
-	// leaving the ECU without the boost state for good.
+	// The ECU starts talking before the first vehicle hash read lands. With no
+	// command either way, a frame is the only evidence available and is allowed
+	// to authorise the re-send, or anything commanded while it was unreachable
+	// stays dropped for good.
 	ecu.HandleFrame(makeFrame(frameStatus1, []byte{0, 0, 0, 0, 0, 0, 0, 0}))
 
 	ids := bus.ids()

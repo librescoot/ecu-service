@@ -148,11 +148,20 @@ type ECU struct {
 	warrantyDate         uint32
 	gearsSentOnPower     bool // whether gearRatioValues have been sent since the ECU last powered on
 	brakeFaultSeen       bool // edges the suppressed brake-applied log line
-	// powered mirrors vehicle[engine-power] && vehicle[main-power]. The ECU is
-	// only supplied in parked and ready-to-drive; frames sent while it is dark
-	// are never acknowledged, and enough unacknowledged frames walk the TX error
-	// counter up to 256 and latch the controller bus-off.
-	powered bool
+	// powerCmd is what vehicle-service commanded, as seen in the vehicle hash.
+	// The ECU is only supplied in parked and ready-to-drive; frames sent while it
+	// is dark are never acknowledged, and enough unacknowledged frames walk the
+	// TX error counter up to 256 and latch the controller bus-off.
+	//
+	// Tri-state on purpose. "Not read yet" and "read, and it says off" are
+	// different facts, and collapsing them into one bool is what let a frame
+	// already in flight re-open the gate at the moment the rail was being cut.
+	powerCmd powerCommand
+	// stateAppliedToECU records whether the commanded KERS and boost state has
+	// been put on the wire since the ECU was last reachable. Frames raised while
+	// it was dark are dropped rather than queued, so this is what the re-send on
+	// the dark-to-reachable edge exists to repair.
+	stateAppliedToECU bool
 
 	// Status bits reported by the ECU (paired enable/disable flags, Status4)
 	ecuStatusEnabled bool
@@ -209,6 +218,33 @@ func newECU(bus *can.Bus, log *Logger, gearRatioValues []uint8) *ECU {
 	}
 }
 
+// powerCommand is what vehicle-service has told us about the ECU's supply.
+type powerCommand int
+
+const (
+	// powerUnknown means no vehicle hash read has landed yet. The ECU may well
+	// be alive, so a frame from it is allowed to authorise transmission.
+	powerUnknown powerCommand = iota
+	// powerOff means the hash was read and says the rail is down. This is a
+	// definite answer and outranks any frame: vehicle-service commanding the
+	// rail off is more authoritative than a frame that was already on the wire
+	// when it did.
+	powerOff
+	// powerOn means the hash was read and says the rail is up.
+	powerOn
+)
+
+func (p powerCommand) String() string {
+	switch p {
+	case powerOn:
+		return "on"
+	case powerOff:
+		return "off"
+	default:
+		return "unknown"
+	}
+}
+
 // faultCodeBrakeApplied is the controller's code for the engine brake line
 // being asserted. Named rather than inline so the suppression below is legible.
 const faultCodeBrakeApplied = 15
@@ -230,15 +266,17 @@ func (b *ECU) HandleFrame(frame can.Frame) {
 		b.log.Info("ECU frames resumed after %.1fs of silence", gap.Seconds())
 	}
 	b.lastFrameTime = time.Now()
-	// Hearing from the ECU is proof it has power, and is quicker than waiting
-	// for the watchdog's next read of the vehicle hash. Go through the same edge
-	// handling, or anything commanded while the ECU was dark stays dropped: the
-	// watchdog's later SetPowered(true) would see no change and skip the re-send.
-	if !b.powered {
-		b.powered = true
-		b.log.Info("ECU power: true (first frame)")
-		b.sendKersStateLocked()
-	}
+	// A frame is evidence the controller is alive, which is not the same fact as
+	// what vehicle-service commanded, so it deliberately does not write the power
+	// command. It only closes the gap the re-send exists for: anything commanded
+	// while the ECU was unreachable was dropped, and this is the earliest moment
+	// we know it would be heard.
+	//
+	// It must not be able to re-open a commanded-off gate. Doing that let frames
+	// still in flight while the rail was being cut flip the state back and forth
+	// at the watchdog tick, transmitting into a controller that was losing supply
+	// on every flip.
+	b.applyCommandedStateLocked()
 
 	switch frame.ID {
 	case frameStatus1:
@@ -581,34 +619,73 @@ func (b *ECU) updatePower() {
 	}
 }
 
-// publish sends a frame only while the ECU has power. Callers hold b.mu.
+// mayTransmitLocked reports whether it is safe to put a frame on the bus.
+// Callers hold b.mu.
+//
+// A commanded-off ECU is never transmitted to, whatever arrives on the wire. An
+// unknown command defers to evidence: if the controller has just sent us
+// something it is demonstrably alive and will acknowledge, which is the case
+// that matters between service start and the first vehicle hash read.
+func (b *ECU) mayTransmitLocked() bool {
+	switch b.powerCmd {
+	case powerOn:
+		return true
+	case powerUnknown:
+		return time.Since(b.lastFrameTime) < ecuSilenceLogAfter
+	default:
+		return false
+	}
+}
+
+// publish sends a frame only when the ECU can be expected to acknowledge it.
+// Callers hold b.mu.
 func (b *ECU) publish(frame can.Frame, what string) error {
 	if b.bus == nil {
 		return nil
 	}
-	if !b.powered {
-		b.log.Debug("ECU unpowered, dropping %s frame", what)
+	if !b.mayTransmitLocked() {
+		b.log.Debug("ECU power %s, dropping %s frame", b.powerCmd, what)
 		return nil
 	}
 	return b.bus.Publish(frame)
 }
 
-// SetPowered records whether the ECU is supplied, as seen in the vehicle hash.
-// Frames raised while it was dark were dropped rather than queued, so the
-// commanded KERS state is re-sent on the dark-to-powered edge. Receiving a frame
-// also proves power and sets this directly, which beats waiting for the next
-// watchdog poll.
+// SetPowered records what the vehicle hash says about the ECU's supply. This is
+// the only writer of the power command: a received frame is evidence the
+// controller is alive, which is a different fact and is handled separately.
 func (b *ECU) SetPowered(powered bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if powered == b.powered {
+
+	cmd := powerOff
+	if powered {
+		cmd = powerOn
+	}
+	if cmd == b.powerCmd {
 		return
 	}
-	b.powered = powered
-	b.log.Info("ECU power: %v", powered)
-	if powered {
-		b.sendKersStateLocked()
+	b.powerCmd = cmd
+	b.log.Info("ECU power: %s", cmd)
+
+	if cmd == powerOff {
+		// Whatever we sent is void once the rail drops: the controller comes back
+		// with none of it, so the next reachable edge has to re-apply.
+		b.stateAppliedToECU = false
+		return
 	}
+	b.applyCommandedStateLocked()
+}
+
+// applyCommandedStateLocked puts the commanded KERS and boost state on the wire
+// if that has not already happened since the ECU was last reachable. Idempotent,
+// so it is safe to call from both the command edge and the first frame without
+// the two duplicating each other. Callers hold b.mu.
+func (b *ECU) applyCommandedStateLocked() {
+	if b.stateAppliedToECU || !b.mayTransmitLocked() {
+		return
+	}
+	b.stateAppliedToECU = true
+	b.sendKersStateLocked()
 }
 
 // sendKersStateLocked emits the frames that carry the currently commanded KERS

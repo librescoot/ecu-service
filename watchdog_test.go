@@ -33,7 +33,7 @@ func newTestCommLostWatcher(ecu *ECU, powerOnAge time.Duration) *CommLostWatcher
 // case is logged instead of raised.
 func TestCommLostWatcher_StandstillStaleDoesNotRaise(t *testing.T) {
 	ecu, _ := newGatedECU()
-	ecu.powered = true
+	ecu.powerCmd = powerOn
 	ecu.speed = 0
 	ecu.lastFrameTime = time.Now().Add(-pastGrace)
 
@@ -53,7 +53,7 @@ func TestCommLostWatcher_StandstillStaleDoesNotRaise(t *testing.T) {
 func TestCommLostWatcher_SilentAtRestLogsOnceThenRecovers(t *testing.T) {
 	var buf bytes.Buffer
 	ecu, _ := newGatedECU()
-	ecu.powered = true
+	ecu.powerCmd = powerOn
 	ecu.speed = 0
 	ecu.lastFrameTime = time.Now().Add(-pastGrace)
 
@@ -82,7 +82,7 @@ func TestCommLostWatcher_SilentAtRestLogsOnceThenRecovers(t *testing.T) {
 // case: it must keep working once the moving gate is gone.
 func TestCommLostWatcher_MovingStaleStillRaises(t *testing.T) {
 	ecu, _ := newGatedECU()
-	ecu.powered = true
+	ecu.powerCmd = powerOn
 	ecu.speed = 15
 	ecu.lastFrameTime = time.Now().Add(-pastGrace)
 
@@ -95,7 +95,7 @@ func TestCommLostWatcher_MovingStaleStillRaises(t *testing.T) {
 
 func TestCommLostWatcher_FreshFrameDoesNotRaise(t *testing.T) {
 	ecu, _ := newGatedECU()
-	ecu.powered = true
+	ecu.powerCmd = powerOn
 	ecu.speed = 0
 	ecu.lastFrameTime = time.Now()
 
@@ -112,7 +112,7 @@ func TestCommLostWatcher_FreshFrameDoesNotRaise(t *testing.T) {
 // power-on edge}, so this must not raise the instant power comes on.
 func TestCommLostWatcher_PowerOnEdgeIgnoresCarriedOverFrameAge(t *testing.T) {
 	ecu, _ := newGatedECU()
-	ecu.powered = true
+	ecu.powerCmd = powerOn
 	ecu.speed = 0
 	ecu.lastFrameTime = time.Now().Add(-pastGrace)
 
@@ -124,7 +124,7 @@ func TestCommLostWatcher_PowerOnEdgeIgnoresCarriedOverFrameAge(t *testing.T) {
 
 func TestCommLostWatcher_UnpoweredNeverRaises(t *testing.T) {
 	ecu, _ := newGatedECU()
-	ecu.powered = true
+	ecu.powerCmd = powerOn
 	ecu.speed = 0
 	ecu.lastFrameTime = time.Now().Add(-pastGrace)
 
@@ -140,7 +140,7 @@ func TestCommLostWatcher_UnpoweredNeverRaises(t *testing.T) {
 // verdict stays raised rather than flapping.
 func TestCommLostWatcher_NoFlapAtStandstillOnceRaised(t *testing.T) {
 	ecu, _ := newGatedECU()
-	ecu.powered = true
+	ecu.powerCmd = powerOn
 	ecu.speed = 12
 	ecu.lastFrameTime = time.Now().Add(-pastGrace)
 
@@ -172,7 +172,7 @@ func TestCommLostWatcher_GraceClearsColdStart(t *testing.T) {
 // power-on, because the cluster renders faultCode 20 as "—" for speed.
 func TestCommLostWatcher_ColdStartDoesNotRaise(t *testing.T) {
 	ecu, _ := newGatedECU()
-	ecu.powered = true
+	ecu.powerCmd = powerOn
 	ecu.speed = 12 // moving, so only the grace window can suppress the raise
 	// Carried over from the previous power cycle, as it is in the real service.
 	ecu.lastFrameTime = time.Now().Add(-time.Minute)
@@ -188,7 +188,7 @@ func TestCommLostWatcher_ColdStartDoesNotRaise(t *testing.T) {
 // grace must not turn a genuinely dead ECU into a permanently silent watchdog.
 func TestCommLostWatcher_SilentEcuRaisesAfterGrace(t *testing.T) {
 	ecu, _ := newGatedECU()
-	ecu.powered = true
+	ecu.powerCmd = powerOn
 	ecu.speed = 12 // mid-ride: the case the fault exists for
 	ecu.lastFrameTime = time.Now().Add(-time.Minute)
 
