@@ -51,9 +51,9 @@ Publishes the `engine-ecu` hash: `motor:voltage`, `motor:current`, `rpm`,
 `speed`, `raw-speed`, `throttle`, `brake`, `power`, `energy:consumed`,
 `energy:recovered`, `temperature`, `fault:code`, `fault:description`,
 `odometer`, `kers`, `boost`, `kers-reason-off`, `gear`, `fw-version`.
-Change notifications go out on the `engine-ecu`,
-`engine-ecu throttle`, `engine-ecu odometer`, `engine-ecu kers`, and
-`engine-ecu kers-reason-off` channels.
+Change notifications all go out on the `engine-ecu` channel, with the name of
+the field that changed as the message: `throttle`, `odometer`, `kers`,
+`kers-reason-off`, `regen-available`, and `fault`.
 
 Faults are written to the `engine-ecu:fault` set and the `events:faults`
 stream. The `kers` and `boost` fields reflect the state the ECU acknowledges

@@ -10,16 +10,16 @@ import (
 )
 
 const (
-	ecuHashKey      = "engine-ecu"
-	faultSetKey     = "engine-ecu:fault"
-	faultStreamKey  = "events:faults"
-	faultStreamMax  = 1000
-	ecuChannel      = "engine-ecu"
-	throttleChannel = "engine-ecu throttle"
-	odometerChannel = "engine-ecu odometer"
-	kersChannel     = "engine-ecu kers"
-	kersReasonChan  = "engine-ecu kers-reason-off"
-	regenChannel    = "engine-ecu regen-available"
+	ecuHashKey     = "engine-ecu"
+	faultSetKey    = "engine-ecu:fault"
+	faultStreamKey = "events:faults"
+	faultStreamMax = 1000
+	// ecuChannel carries every hash change notification. The convention is
+	// channel = hash name, message = field name. "engine-ecu throttle" is how
+	// that pair gets written down in docs, not a channel of its own: published
+	// as a literal channel name it reaches nobody, since subscribers listen on
+	// "engine-ecu".
+	ecuChannel = "engine-ecu"
 )
 
 type Status struct {
@@ -244,32 +244,32 @@ func (tx *IPCTx) SendECUConfig(c ECUConfigStatus) error {
 
 // PublishThrottle notifies subscribers that the throttle state changed.
 func (tx *IPCTx) PublishThrottle() error {
-	_, err := tx.client.Publish(throttleChannel, "")
+	_, err := tx.client.Publish(ecuChannel, "throttle")
 	return err
 }
 
 // PublishOdometer notifies subscribers that the odometer changed.
 func (tx *IPCTx) PublishOdometer() error {
-	_, err := tx.client.Publish(odometerChannel, "")
+	_, err := tx.client.Publish(ecuChannel, "odometer")
 	return err
 }
 
 // PublishKERS notifies subscribers that KERS enable state changed.
 func (tx *IPCTx) PublishKERS() error {
-	_, err := tx.client.Publish(kersChannel, "")
+	_, err := tx.client.Publish(ecuChannel, "kers")
 	return err
 }
 
 // PublishKERSReasonOff notifies subscribers that the KERS-off reason changed.
 func (tx *IPCTx) PublishKERSReasonOff() error {
-	_, err := tx.client.Publish(kersReasonChan, "")
+	_, err := tx.client.Publish(ecuChannel, "kers-reason-off")
 	return err
 }
 
 // PublishRegen notifies subscribers that the derived regen availability or
 // reason changed.
 func (tx *IPCTx) PublishRegen() error {
-	_, err := tx.client.Publish(regenChannel, "")
+	_, err := tx.client.Publish(ecuChannel, "regen-available")
 	return err
 }
 
