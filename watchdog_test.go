@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"log"
+	"strings"
 	"testing"
 	"time"
 )
@@ -17,16 +20,18 @@ const pastGrace = commLostPowerOnGrace + commLostRaiseAfter
 func newTestCommLostWatcher(ecu *ECU, powerOnAge time.Duration) *CommLostWatcher {
 	return &CommLostWatcher{
 		ecu:            ecu,
+		log:            newLogger(LogLevelNone),
 		prevEcuPowered: true,
 		powerOnEdge:    time.Now().Add(-powerOnAge),
 	}
 }
 
-// TestCommLostWatcher_StandstillStaleRaises is the regression case for
-// librescoot-z57t: a stale, powered ECU at speed 0 must raise E20. The old
-// "moving" gate (w.ecu.Speed() != 0) suppressed this, so a bus-off at a
-// standstill never surfaced the fault.
-func TestCommLostWatcher_StandstillStaleRaises(t *testing.T) {
+// TestCommLostWatcher_StandstillStaleDoesNotRaise pins the reinstated speed
+// gate. Field logs showed powered controllers going quiet at a standstill often
+// enough that raising E20 for it dashes the cluster for a condition the rider
+// cannot act on and which clears itself as soon as they move off. The at-rest
+// case is logged instead of raised.
+func TestCommLostWatcher_StandstillStaleDoesNotRaise(t *testing.T) {
 	ecu, _ := newGatedECU()
 	ecu.powered = true
 	ecu.speed = 0
@@ -34,8 +39,42 @@ func TestCommLostWatcher_StandstillStaleRaises(t *testing.T) {
 
 	w := newTestCommLostWatcher(ecu, pastGrace)
 
-	if !w.evaluate(true) {
-		t.Fatal("expected E20 to raise for a stale, powered ECU at standstill")
+	if w.evaluate(true) {
+		t.Fatal("a stale ECU at speed 0 must not raise E20; it is logged, not shown")
+	}
+	if !w.silentAtRest {
+		t.Error("the at-rest case must be recorded so it can be counted in the field")
+	}
+}
+
+// TestCommLostWatcher_SilentAtRestLogsOnceThenRecovers covers the edge tracking:
+// the check runs at 2Hz and a quiet ECU stays quiet, so the log line must fire
+// on the transition rather than on the condition.
+func TestCommLostWatcher_SilentAtRestLogsOnceThenRecovers(t *testing.T) {
+	var buf bytes.Buffer
+	ecu, _ := newGatedECU()
+	ecu.powered = true
+	ecu.speed = 0
+	ecu.lastFrameTime = time.Now().Add(-pastGrace)
+
+	w := newTestCommLostWatcher(ecu, pastGrace)
+	w.log = &Logger{l: log.New(&buf, "", 0), level: LogLevelInfo}
+
+	for i := 0; i < 5; i++ {
+		w.evaluate(true)
+	}
+	if n := strings.Count(buf.String(), "ECU silent at rest"); n != 1 {
+		t.Fatalf("five stale ticks logged the at-rest line %d times, want 1", n)
+	}
+
+	// A frame arrives: the condition ends and that is worth one line too.
+	ecu.lastFrameTime = time.Now()
+	w.evaluate(true)
+	if w.silentAtRest {
+		t.Error("silentAtRest should clear once frames return")
+	}
+	if n := strings.Count(buf.String(), "no longer silent at rest"); n != 1 {
+		t.Errorf("recovery logged %d times, want 1", n)
 	}
 }
 
@@ -77,7 +116,7 @@ func TestCommLostWatcher_PowerOnEdgeIgnoresCarriedOverFrameAge(t *testing.T) {
 	ecu.speed = 0
 	ecu.lastFrameTime = time.Now().Add(-pastGrace)
 
-	w := &CommLostWatcher{ecu: ecu} // zero value: this call is the power-on edge
+	w := &CommLostWatcher{ecu: ecu, log: newLogger(LogLevelNone)} // zero value: this call is the power-on edge
 	if w.evaluate(true) {
 		t.Fatal("a carried-over stale frame timestamp must not raise E20 right after power-on")
 	}
@@ -102,7 +141,7 @@ func TestCommLostWatcher_UnpoweredNeverRaises(t *testing.T) {
 func TestCommLostWatcher_NoFlapAtStandstillOnceRaised(t *testing.T) {
 	ecu, _ := newGatedECU()
 	ecu.powered = true
-	ecu.speed = 0
+	ecu.speed = 12
 	ecu.lastFrameTime = time.Now().Add(-pastGrace)
 
 	w := newTestCommLostWatcher(ecu, pastGrace)
@@ -134,7 +173,7 @@ func TestCommLostWatcher_GraceClearsColdStart(t *testing.T) {
 func TestCommLostWatcher_ColdStartDoesNotRaise(t *testing.T) {
 	ecu, _ := newGatedECU()
 	ecu.powered = true
-	ecu.speed = 0
+	ecu.speed = 12 // moving, so only the grace window can suppress the raise
 	// Carried over from the previous power cycle, as it is in the real service.
 	ecu.lastFrameTime = time.Now().Add(-time.Minute)
 
@@ -150,7 +189,7 @@ func TestCommLostWatcher_ColdStartDoesNotRaise(t *testing.T) {
 func TestCommLostWatcher_SilentEcuRaisesAfterGrace(t *testing.T) {
 	ecu, _ := newGatedECU()
 	ecu.powered = true
-	ecu.speed = 0
+	ecu.speed = 12 // mid-ride: the case the fault exists for
 	ecu.lastFrameTime = time.Now().Add(-time.Minute)
 
 	w := newTestCommLostWatcher(ecu, commLostPowerOnGrace+100*time.Millisecond)

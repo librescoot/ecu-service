@@ -54,21 +54,26 @@ const (
 // CommLostWatcher raises fault E20 when the ECU should be alive and powered but
 // hasn't sent a CAN frame within commLostRaiseAfter. It is gated on vehicle
 // engine-power && main-power (so it stays quiet during standby or when 48V is
-// down) and on a power-on grace window wide enough for the ECU to boot. It does
-// not gate on speed: once up, a powered ECU broadcasts Status frames unprompted
-// whether or not it is moving, so frame staleness on its own is a sound signal
-// and a parked-but-powered ECU never raises the fault. The 0x4EF poll only
-// covers the gap before the first broadcast. Gating on speed hid a dead bus at
-// standstill.
+// down), on a power-on grace window wide enough for the ECU to boot, and on the
+// last known speed being non-zero.
 //
-// Measured stationary on two controllers. The rate differs by 20x, the gap that
-// this check actually depends on does not:
+// That speed gate is deliberate and was reinstated after field evidence. A
+// powered controller that goes quiet while the vehicle is stopped turns out to
+// be common across the fleet rather than exceptional: controllers vary in how
+// much they report at rest, and raising E20 for it dashes the cluster at a
+// standstill for a condition the rider can do nothing about and which clears
+// itself the moment they set off. The at-rest case is logged instead, at info,
+// so it can be counted in the field without being shown to riders.
 //
-//	replacement logic board   ~200 frames/s
+// The cost is accepted knowingly: a bus that dies while the vehicle is parked
+// and powered will not raise E20 until the vehicle moves. Frame staleness while
+// moving is unambiguous and still raises immediately.
+//
+// Measured stationary on two controllers, both healthy. The rate differs by
+// 20x, the gap this check depends on does not:
+//
+//	replacement logic board   ~200 frames/s, occasional multi-second dropouts
 //	stock controller          10 frames/s, largest gap 0.26s over 83s
-//
-// Both leave commLostRaiseAfter a wide margin, so a healthy bus does not trip
-// the check on either.
 type CommLostWatcher struct {
 	ipc      *ipc.Client
 	ecu      *ECU
@@ -78,6 +83,10 @@ type CommLostWatcher struct {
 	published      bool
 	prevEcuPowered bool
 	powerOnEdge    time.Time
+	// silentAtRest edges the at-rest log line. The check runs at 2Hz, and an ECU
+	// that has gone quiet stays quiet, so logging the condition rather than the
+	// transition would fill the journal for as long as it lasts.
+	silentAtRest bool
 }
 
 func newCommLostWatcher(client *ipc.Client, ecu *ECU, log *Logger, onChange func(bool)) *CommLostWatcher {
@@ -153,5 +162,27 @@ func (w *CommLostWatcher) evaluate(ecuPowered bool) bool {
 		}
 	}
 	stale := frameAge > commLostRaiseAfter
-	return stale && ecuPowered && !inGrace
+	silent := stale && ecuPowered && !inGrace
+
+	// Speed is the ECU's own last reported value, so it is whatever was true when
+	// it stopped talking: non-zero means it went quiet mid-ride.
+	moving := w.ecu.Speed() != 0
+	w.noteSilentAtRest(silent && !moving, frameAge)
+
+	return silent && moving
+}
+
+// noteSilentAtRest logs the suppressed case on its edges. This is the only
+// record that a powered controller went quiet while stopped, so it is info
+// rather than debug: the whole point is to be able to count it in the field
+// from ordinary log packages.
+func (w *CommLostWatcher) noteSilentAtRest(silent bool, frameAge time.Duration) {
+	switch {
+	case silent && !w.silentAtRest:
+		w.silentAtRest = true
+		w.log.Info("ECU silent at rest: powered, no frame for %.1fs, speed 0. E20 suppressed while stopped", frameAge.Seconds())
+	case !silent && w.silentAtRest:
+		w.silentAtRest = false
+		w.log.Info("ECU no longer silent at rest")
+	}
 }
