@@ -1,5 +1,7 @@
 package main
 
+import "fmt"
+
 type Fault uint32
 
 const (
@@ -16,7 +18,13 @@ const (
 	FaultThrottleAbnormal        Fault = 12
 	FaultMotorTempProtection     Fault = 13
 	FaultThrottleActiveAtPowerUp Fault = 14
-	FaultInternal15vAbnormal     Fault = 16
+	// FaultBrakeApplied (E15) is the controller reporting that the engine brake
+	// line is asserted. The vehicle asserts it deliberately in every state except
+	// drive, as the interlock that stops a parked scooter riding off, so seeing
+	// it is the system working rather than a defect. Mapped so it is recognised
+	// and described, and marked Expected so it never reaches the fault set.
+	FaultBrakeApplied        Fault = 15
+	FaultInternal15vAbnormal Fault = 16
 	// FaultECUCommLost (E20) is synthetic: raised by the comm-lost watchdog when
 	// the ECU should be powered but has gone silent. Not a CAN-reported code.
 	FaultECUCommLost Fault = 20
@@ -25,6 +33,13 @@ const (
 type FaultConfig struct {
 	Description string
 	Severity    string // "warning" or "critical"
+	// Expected marks a code the vehicle causes on purpose. It is described and
+	// published as the ECU's raw reading, but never enters the fault set.
+	Expected bool
+	// Unknown marks a code with no entry in faultMap. Callers log these once so
+	// gaps in the table surface from the field instead of being silently
+	// reported as a healthy vehicle.
+	Unknown bool
 }
 
 var faultMap = map[uint32]Fault{
@@ -40,29 +55,52 @@ var faultMap = map[uint32]Fault{
 	0x0C: FaultThrottleAbnormal,
 	0x0D: FaultMotorTempProtection,
 	0x0E: FaultThrottleActiveAtPowerUp,
+	0x0F: FaultBrakeApplied,
 	0x10: FaultInternal15vAbnormal,
 }
 
 var faultConfigs = map[Fault]FaultConfig{
-	FaultBatteryOverVoltage:      {"Battery over-voltage", "critical"},
-	FaultBatteryUnderVoltage:     {"Battery under-voltage", "critical"},
-	FaultMotorShortCircuit:       {"Motor short-circuit", "critical"},
-	FaultMotorStalled:            {"Motor stalled", "critical"},
-	FaultHallSensorAbnormal:      {"Hall sensor abnormal", "critical"},
-	FaultMOSFETCheckError:        {"MOSFET check error", "critical"},
-	FaultMotorOpenCircuit:        {"Motor open-circuit", "critical"},
-	FaultPowerOnSelfCheckError:   {"Power-on self-check error", "critical"},
-	FaultOverTemperature:         {"Over-temperature", "critical"},
-	FaultThrottleAbnormal:        {"Throttle abnormal", "critical"},
-	FaultInternal15vAbnormal:     {"Internal 15V abnormal", "critical"},
-	FaultMotorTempProtection:     {"Motor temperature protection", "warning"},
-	FaultThrottleActiveAtPowerUp: {"Throttle active at power up", "warning"},
-	FaultECUCommLost:             {"ECU communication lost", "critical"},
+	FaultBatteryOverVoltage:      {Description: "Battery over-voltage", Severity: "critical"},
+	FaultBatteryUnderVoltage:     {Description: "Battery under-voltage", Severity: "critical"},
+	FaultMotorShortCircuit:       {Description: "Motor short-circuit", Severity: "critical"},
+	FaultMotorStalled:            {Description: "Motor stalled", Severity: "critical"},
+	FaultHallSensorAbnormal:      {Description: "Hall sensor abnormal", Severity: "critical"},
+	FaultMOSFETCheckError:        {Description: "MOSFET check error", Severity: "critical"},
+	FaultMotorOpenCircuit:        {Description: "Motor open-circuit", Severity: "critical"},
+	FaultPowerOnSelfCheckError:   {Description: "Power-on self-check error", Severity: "critical"},
+	FaultOverTemperature:         {Description: "Over-temperature", Severity: "critical"},
+	FaultThrottleAbnormal:        {Description: "Throttle abnormal", Severity: "critical"},
+	FaultInternal15vAbnormal:     {Description: "Internal 15V abnormal", Severity: "critical"},
+	FaultMotorTempProtection:     {Description: "Motor temperature protection", Severity: "warning"},
+	FaultThrottleActiveAtPowerUp: {Description: "Throttle active at power up", Severity: "warning"},
+	FaultBrakeApplied:            {Description: "Engine brake applied", Severity: "warning", Expected: true},
+	FaultECUCommLost:             {Description: "ECU communication lost", Severity: "critical"},
 }
 
+// MapFault resolves a raw ECU fault code to a fault and its config.
+//
+// An unrecognised code is NOT treated as "no fault". Doing that took the
+// FaultNone branch in ReportFault, which deletes the fault set and emits a
+// code-0 all-clear, so a controller reporting something we had never seen was
+// announced downstream as a healthy vehicle. Unknown codes are surfaced under
+// their own raw number instead, so they show up rather than being swallowed.
 func MapFault(code uint32) (Fault, FaultConfig) {
-	if f, ok := faultMap[code]; ok {
-		return f, faultConfigs[f]
+	if code == 0 {
+		return FaultNone, FaultConfig{}
 	}
-	return FaultNone, FaultConfig{}
+	if f, ok := faultMap[code]; ok {
+		cfg := faultConfigs[f]
+		if cfg.Expected {
+			return FaultNone, cfg
+		}
+		return f, cfg
+	}
+	// Severity is "warning" deliberately: we do not know what the code means, and
+	// crying critical over every gap in the table (0x08 and 0x09 are unassigned
+	// as far as we know) would train riders to ignore it. It is still reported.
+	return Fault(code), FaultConfig{
+		Description: fmt.Sprintf("Unknown ECU fault code %d", code),
+		Severity:    "warning",
+		Unknown:     true,
+	}
 }

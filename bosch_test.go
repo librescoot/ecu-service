@@ -471,10 +471,41 @@ func TestMapFault_AllCodes(t *testing.T) {
 	}
 }
 
+// TestMapFault_Unknown pins the behaviour that an unrecognised code is exposed
+// rather than swallowed. Returning FaultNone here sent ReportFault down its
+// clear path, which deletes the fault set and emits a code-0 all-clear: a
+// controller reporting something we had never seen was announced downstream as
+// a healthy vehicle. 0x08, 0x09 and 0x0F all sat in that hole.
 func TestMapFault_Unknown(t *testing.T) {
-	f, _ := MapFault(0xFF)
+	f, cfg := MapFault(0xFF)
+	if f != Fault(0xFF) {
+		t.Errorf("unknown code should be surfaced under its own number, got %d", f)
+	}
+	if !cfg.Unknown {
+		t.Error("unknown code should be flagged Unknown so callers can log it")
+	}
+	if cfg.Description == "" {
+		t.Error("unknown code should carry a description, not an empty string")
+	}
+}
+
+// TestMapFault_BrakeAppliedIsExpected covers E15. The vehicle asserts the engine
+// brake itself in every state except drive, as the interlock that stops a parked
+// scooter riding off, so the controller reporting it back is the system working.
+// It must be described but must never reach the fault set.
+func TestMapFault_BrakeAppliedIsExpected(t *testing.T) {
+	f, cfg := MapFault(0x0F)
 	if f != FaultNone {
-		t.Errorf("unknown code should map to FaultNone, got %d", f)
+		t.Errorf("E15 is self-inflicted and must not raise a fault, got %d", f)
+	}
+	if !cfg.Expected {
+		t.Error("E15 should be flagged Expected")
+	}
+	if cfg.Unknown {
+		t.Error("E15 is mapped, it must not be flagged Unknown")
+	}
+	if cfg.Description == "" {
+		t.Error("E15 should still be described for diagnostics")
 	}
 }
 

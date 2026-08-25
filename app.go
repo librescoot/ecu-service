@@ -41,6 +41,10 @@ type App struct {
 	lastRegenAvailable bool
 	lastRegenReason    string
 	lastECUConfig      ECUConfigStatus
+	// lastUnknownFault dedupes the unknown-code warning. The ECU repeats its
+	// fault code on every status frame, so logging unconditionally would bury
+	// the journal at the frame rate.
+	lastUnknownFault uint32
 }
 
 func NewApp(ctx context.Context, opts Options) (*App, error) {
@@ -273,6 +277,16 @@ func (a *App) onFrame() {
 	if s.FaultCode != 0 {
 		_, cfg := MapFault(s.FaultCode)
 		s.FaultDesc = cfg.Description
+		// A code with no entry in the table is a gap we want to hear about. This
+		// is the only place it becomes visible, so log it once per distinct code
+		// rather than letting it pass as an anonymous number in Redis.
+		if cfg.Unknown && s.FaultCode != a.lastUnknownFault {
+			a.lastUnknownFault = s.FaultCode
+			a.log.Warn("ECU reported fault code %d (0x%02X), which is not in the fault table", s.FaultCode, s.FaultCode)
+		}
+	}
+	if s.FaultCode == 0 {
+		a.lastUnknownFault = 0
 	}
 
 	regen := a.regenState(s)
