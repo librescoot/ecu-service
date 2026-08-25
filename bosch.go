@@ -208,10 +208,22 @@ func newECU(bus *can.Bus, log *Logger, gearRatioValues []uint8) *ECU {
 	}
 }
 
+// ecuSilenceLogAfter is the receive gap worth a log line. Deliberately below
+// the watchdog's raise threshold so gaps that never reach E20 still surface:
+// a controller dropping out for two seconds at a time is a real symptom and
+// used to be visible only as missing rows in a once-a-second firmware line.
+const ecuSilenceLogAfter = 2 * time.Second
+
 func (b *ECU) HandleFrame(frame can.Frame) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	// Frame presence is the single most useful thing this log carries when
+	// diagnosing a quiet ECU, so make the gaps explicit rather than leaving them
+	// to be inferred from the spacing of other lines.
+	if gap := time.Since(b.lastFrameTime); gap > ecuSilenceLogAfter {
+		b.log.Info("ECU frames resumed after %.1fs of silence", gap.Seconds())
+	}
 	b.lastFrameTime = time.Now()
 	// Hearing from the ECU is proof it has power, and is quicker than waiting
 	// for the watchdog's next read of the vehicle hash. Go through the same edge
@@ -398,17 +410,38 @@ func (b *ECU) handleStatus5(frame can.Frame) {
 	//   [5]   motor max speed   (BCD, km/h)
 	//   [6]   base SW version   (BCD, high.low nibbles)
 	//   [7]   app SW version    (decimal revision number)
-	b.warrantyDate = binary.BigEndian.Uint32(frame.Data[0:4])
-	b.firmwareVersion = binary.BigEndian.Uint32(frame.Data[4:8])
+	warrantyDate := binary.BigEndian.Uint32(frame.Data[0:4])
+	firmwareVersion := binary.BigEndian.Uint32(frame.Data[4:8])
+	motorRatedPowerKW := bcdByteToDecimal(frame.Data[4])
+	motorMaxSpeedKMH := bcdByteToDecimal(frame.Data[5])
+	swBaseVersion := frame.Data[6]
+	swAppVersion := frame.Data[7]
 
-	b.motorRatedPowerKW = bcdByteToDecimal(frame.Data[4])
-	b.motorMaxSpeedKMH = bcdByteToDecimal(frame.Data[5])
-	b.swBaseVersion = frame.Data[6]
-	b.swAppVersion = frame.Data[7]
+	// The ECU rebroadcasts Status5 for as long as it is powered, roughly once a
+	// second, and every field in it is fixed for the life of the controller. Log
+	// on change only: unconditionally was 176 identical lines out of 2966 in one
+	// reporter's journal, all with the same payload, crowding out the events
+	// worth reading and writing them to flash. The Redis publish path already
+	// dedupes these same fields (see ipc_tx.go); this line just never did.
+	changed := firmwareVersion != b.firmwareVersion ||
+		warrantyDate != b.warrantyDate ||
+		motorRatedPowerKW != b.motorRatedPowerKW ||
+		motorMaxSpeedKMH != b.motorMaxSpeedKMH ||
+		swBaseVersion != b.swBaseVersion ||
+		swAppVersion != b.swAppVersion
 
-	b.log.Info("ECU firmware 0x%08X (warranty 0x%08X) %dkW / %dkm/h / base=%s / app=%s",
-		b.firmwareVersion, b.warrantyDate, b.motorRatedPowerKW, b.motorMaxSpeedKMH,
-		formatBCDVersion(b.swBaseVersion), formatAppVersion(b.swAppVersion))
+	b.warrantyDate = warrantyDate
+	b.firmwareVersion = firmwareVersion
+	b.motorRatedPowerKW = motorRatedPowerKW
+	b.motorMaxSpeedKMH = motorMaxSpeedKMH
+	b.swBaseVersion = swBaseVersion
+	b.swAppVersion = swAppVersion
+
+	if changed {
+		b.log.Info("ECU firmware 0x%08X (warranty 0x%08X) %dkW / %dkm/h / base=%s / app=%s",
+			b.firmwareVersion, b.warrantyDate, b.motorRatedPowerKW, b.motorMaxSpeedKMH,
+			formatBCDVersion(b.swBaseVersion), formatAppVersion(b.swAppVersion))
+	}
 }
 
 func (b *ECU) handleMaxVoltage(frame can.Frame) {

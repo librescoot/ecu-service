@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
+	"log"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/brutella/can"
@@ -673,5 +676,31 @@ func TestSetGear_DroppedWhileUnpowered(t *testing.T) {
 
 	if len(bus.sent) != 0 {
 		t.Fatalf("unpowered ECU sent a gear frame: %#x", bus.ids())
+	}
+}
+
+// TestHandleStatus5_LogsFirmwareOnlyOnChange pins the log-on-change behaviour.
+// A powered ECU rebroadcasts Status5 about once a second forever, and every
+// field in it is fixed for the life of the controller, so logging it on every
+// frame filled 176 of 2966 lines in one reporter's journal with a single
+// repeated payload.
+func TestHandleStatus5_LogsFirmwareOnlyOnChange(t *testing.T) {
+	var buf bytes.Buffer
+	ecu, _ := newGatedECU()
+	ecu.log = &Logger{l: log.New(&buf, "", 0), level: LogLevelInfo}
+
+	status5 := makeFrame(frameStatus5, []byte{0x00, 0x00, 0x00, 0x00, 0x04, 0x45, 0x40, 0x0C})
+	for i := 0; i < 5; i++ {
+		ecu.HandleFrame(status5)
+	}
+	if n := strings.Count(buf.String(), "ECU firmware"); n != 1 {
+		t.Fatalf("five identical Status5 frames logged the firmware block %d times, want 1", n)
+	}
+
+	// A genuinely different controller (or a firmware update) must still surface.
+	changed := makeFrame(frameStatus5, []byte{0x00, 0x00, 0x00, 0x00, 0x04, 0x45, 0x40, 0x0D})
+	ecu.HandleFrame(changed)
+	if n := strings.Count(buf.String(), "ECU firmware"); n != 2 {
+		t.Errorf("a changed Status5 payload logged %d times total, want 2", n)
 	}
 }
