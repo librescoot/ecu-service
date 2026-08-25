@@ -50,8 +50,8 @@ When run under systemd/journald, timestamps are left to the journal.
 Publishes the `engine-ecu` hash: `motor:voltage`, `motor:current`, `rpm`,
 `speed`, `raw-speed`, `throttle`, `brake`, `power`, `energy:consumed`,
 `energy:recovered`, `temperature`, `fault:code`, `fault:description`,
-`odometer`, `kers`, `boost`, `kers-reason-off`, `gear`, `fw-version`,
-`warranty-date`. Change notifications go out on the `engine-ecu`,
+`odometer`, `kers`, `boost`, `kers-reason-off`, `gear`, `fw-version`.
+Change notifications go out on the `engine-ecu`,
 `engine-ecu throttle`, `engine-ecu odometer`, `engine-ecu kers`, and
 `engine-ecu kers-reason-off` channels.
 

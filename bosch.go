@@ -423,7 +423,7 @@ func (b *ECU) handleStatus5(frame can.Frame) {
 		return
 	}
 	// Status5 layout (8 bytes, big-endian):
-	//   [0:4] reserved (historically warranty_date)
+	//   [0:4] unknown word, always zero so far
 	//   [4]   motor rated power (BCD, kW)
 	//   [5]   motor max speed   (BCD, km/h)
 	//   [6]   base SW version   (BCD, high.low nibbles)
@@ -456,8 +456,8 @@ func (b *ECU) handleStatus5(frame can.Frame) {
 	b.swAppVersion = swAppVersion
 
 	if changed {
-		b.log.Info("ECU firmware 0x%08X (warranty 0x%08X) %dkW / %dkm/h / base=%s / app=%s",
-			b.firmwareVersion, b.warrantyDate, b.motorRatedPowerKW, b.motorMaxSpeedKMH,
+		b.log.Info("ECU firmware 0x%08X %dkW / %dkm/h / base=%s / app=%s",
+			b.firmwareVersion, b.motorRatedPowerKW, b.motorMaxSpeedKMH,
 			formatBCDVersion(b.swBaseVersion), formatAppVersion(b.swAppVersion))
 	}
 }
