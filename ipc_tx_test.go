@@ -74,6 +74,106 @@ func TestPublishNotificationsUseHashChannelAndFieldMessage(t *testing.T) {
 	}
 }
 
+func TestReportFaultRaiseThenClear(t *testing.T) {
+	tx, mr := newTestTx(t)
+
+	cfg := faultConfigs[FaultOverTemperature]
+	if err := tx.ReportFault(FaultOverTemperature, cfg); err != nil {
+		t.Fatalf("raise: %v", err)
+	}
+	if got := faultSet(t, mr); len(got) != 1 || got[0] != "11" {
+		t.Fatalf("fault set after raise = %v, want [11]", got)
+	}
+
+	if err := tx.ReportFault(FaultNone, FaultConfig{}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if got := faultSet(t, mr); len(got) != 0 {
+		t.Fatalf("fault set after clear = %v, want empty", got)
+	}
+
+	// The clear has to name the fault it clears. A bare code 0 is dropped by
+	// consumers that key on the absolute code, so it never enters fault history.
+	codes := streamCodes(t, mr)
+	want := []string{"11", "-11"}
+	if len(codes) != len(want) {
+		t.Fatalf("stream codes = %v, want %v", codes, want)
+	}
+	for i := range want {
+		if codes[i] != want[i] {
+			t.Fatalf("stream codes = %v, want %v", codes, want)
+		}
+	}
+}
+
+// An A -> B transition has to retire A, or the set carries both codes until
+// something clears it wholesale.
+func TestReportFaultTransitionRetiresPrevious(t *testing.T) {
+	tx, mr := newTestTx(t)
+
+	if err := tx.ReportFault(FaultOverTemperature, faultConfigs[FaultOverTemperature]); err != nil {
+		t.Fatalf("raise A: %v", err)
+	}
+	if err := tx.ReportFault(FaultMotorStalled, faultConfigs[FaultMotorStalled]); err != nil {
+		t.Fatalf("raise B: %v", err)
+	}
+
+	if got := faultSet(t, mr); len(got) != 1 || got[0] != "4" {
+		t.Fatalf("fault set = %v, want [4]", got)
+	}
+
+	codes := streamCodes(t, mr)
+	want := []string{"11", "-11", "4"}
+	if len(codes) != len(want) {
+		t.Fatalf("stream codes = %v, want %v", codes, want)
+	}
+	for i := range want {
+		if codes[i] != want[i] {
+			t.Fatalf("stream codes = %v, want %v", codes, want)
+		}
+	}
+}
+
+// An unrecognised code is reported under its own raw number, which can be large
+// enough to wrap if the clear negates it as an int32.
+func TestReportFaultClearOfLargeUnknownCodeDoesNotWrap(t *testing.T) {
+	tx, mr := newTestTx(t)
+
+	const raw = 0x80000001
+	fault, cfg := MapFault(raw)
+	if err := tx.ReportFault(fault, cfg); err != nil {
+		t.Fatalf("raise: %v", err)
+	}
+	if err := tx.ReportFault(FaultNone, FaultConfig{}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+
+	codes := streamCodes(t, mr)
+	if len(codes) != 2 {
+		t.Fatalf("stream codes = %v, want 2 entries", codes)
+	}
+	if codes[1] != "-2147483649" {
+		t.Errorf("clear code = %q, want %q", codes[1], "-2147483649")
+	}
+}
+
+// A clear with nothing raised sweeps the set without emitting a clear event.
+func TestReportFaultClearWithoutRaiseEmitsNoEvent(t *testing.T) {
+	tx, mr := newTestTx(t)
+
+	mr.SAdd(faultSetKey, "7")
+	if err := tx.ReportFault(FaultNone, FaultConfig{}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+
+	if got := faultSet(t, mr); len(got) != 0 {
+		t.Errorf("fault set = %v, want empty (stale entries swept)", got)
+	}
+	if codes := streamCodes(t, mr); len(codes) != 0 {
+		t.Errorf("stream codes = %v, want none", codes)
+	}
+}
+
 func receive(t *testing.T, sub *redis.PubSub) *redis.Message {
 	t.Helper()
 	select {
@@ -83,4 +183,36 @@ func receive(t *testing.T, sub *redis.PubSub) *redis.Message {
 		t.Fatal("timed out waiting for notification")
 		return nil
 	}
+}
+
+func faultSet(t *testing.T, mr *miniredis.Miniredis) []string {
+	t.Helper()
+	members, err := mr.Members(faultSetKey)
+	if err != nil {
+		if err == miniredis.ErrKeyNotFound {
+			return nil
+		}
+		t.Fatalf("read fault set: %v", err)
+	}
+	return members
+}
+
+func streamCodes(t *testing.T, mr *miniredis.Miniredis) []string {
+	t.Helper()
+	entries, err := mr.Stream(faultStreamKey)
+	if err != nil {
+		if err == miniredis.ErrKeyNotFound {
+			return nil
+		}
+		t.Fatalf("read fault stream: %v", err)
+	}
+	codes := make([]string, 0, len(entries))
+	for _, e := range entries {
+		for i := 0; i+1 < len(e.Values); i += 2 {
+			if e.Values[i] == "code" {
+				codes = append(codes, e.Values[i+1])
+			}
+		}
+	}
+	return codes
 }

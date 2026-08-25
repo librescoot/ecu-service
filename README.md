@@ -56,8 +56,9 @@ the field that changed as the message: `throttle`, `odometer`, `kers`,
 `kers-reason-off`, `regen-available`, and `fault`.
 
 Faults are written to the `engine-ecu:fault` set and the `events:faults`
-stream. The `kers` and `boost` fields reflect the state the ECU acknowledges
-(Status4), not the commanded value.
+stream. A raise carries the positive code, a clear the same code negated, so
+the two can be paired up. The `kers` and `boost` fields reflect the state the
+ECU acknowledges (Status4), not the commanded value.
 
 Consumes vehicle state (`vehicle.state`), battery state and temperature
 (`battery:0`, `battery:1`), and these settings:

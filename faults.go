@@ -69,10 +69,11 @@ var faultConfigs = map[Fault]FaultConfig{
 // MapFault resolves a raw ECU fault code to a fault and its config.
 //
 // An unrecognised code is NOT treated as "no fault". Doing that took the
-// FaultNone branch in ReportFault, which deletes the fault set and emits a
-// code-0 all-clear, so a controller reporting something we had never seen was
-// announced downstream as a healthy vehicle. Unknown codes are surfaced under
-// their own raw number instead, so they show up rather than being swallowed.
+// FaultNone branch in ReportFault, which deletes the fault set and clears
+// whatever was raised, so a controller reporting something we had never seen
+// was announced downstream as a healthy vehicle. Unknown codes are surfaced
+// under their own raw number instead, so they show up rather than being
+// swallowed.
 func MapFault(code uint32) (Fault, FaultConfig) {
 	if code == 0 {
 		return FaultNone, FaultConfig{}

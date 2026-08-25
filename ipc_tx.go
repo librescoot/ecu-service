@@ -87,13 +87,16 @@ type IPCTx struct {
 	ctx    context.Context
 	log    *Logger
 
-	// mu guards last/hasLast, which SendStatus (CAN goroutine) and SetFault
-	// (watchdog goroutine) both touch.
+	// mu guards last/hasLast/lastFault, which SendStatus (CAN goroutine) and
+	// SetFault/ReportFault (watchdog and diagnostics goroutines) all touch.
 	mu sync.Mutex
 	// last is the previously sent status; SendStatus only HSETs changed fields
 	// to avoid redundant Redis writes on every CAN frame.
 	last    Status
 	hasLast bool
+	// lastFault is the fault currently reported into faultSetKey. A clear has
+	// to name the code it clears, so ReportFault needs to remember it.
+	lastFault Fault
 }
 
 func newIPCTx(ctx context.Context, client *ipc.Client, log *Logger) *IPCTx {
@@ -290,19 +293,44 @@ func (tx *IPCTx) SetFault(code uint32, desc string) error {
 }
 
 // ReportFault writes fault presence or absence to the fault set, event stream,
-// and notifies subscribers. An FaultNone fault clears the set.
+// and notifies subscribers.
+//
+// The stream pairs a raise (positive code) with a clear (the same code,
+// negated), so a clear has to name the fault it clears. A bare code 0 breaks
+// that pairing: consumers key on the absolute code and drop it, and the clear
+// never lands in fault history.
 func (tx *IPCTx) ReportFault(fault Fault, cfg FaultConfig) error {
+	tx.mu.Lock()
+	prev := tx.lastFault
+	tx.lastFault = fault
+	tx.mu.Unlock()
+
+	// Both an A -> B transition and an A -> none clear retire A.
+	cleared := prev != FaultNone && prev != fault
+
 	pipe := tx.raw.Pipeline()
 
 	if fault == FaultNone {
+		// Del rather than SRem: it also sweeps whatever a previous process
+		// left in the set.
 		pipe.Del(tx.ctx, faultSetKey)
+	} else {
+		if cleared {
+			pipe.SRem(tx.ctx, faultSetKey, uint32(prev))
+		}
+		pipe.SAdd(tx.ctx, faultSetKey, uint32(fault))
+	}
+
+	if cleared {
 		pipe.XAdd(tx.ctx, &redis.XAddArgs{
 			Stream: faultStreamKey,
 			MaxLen: faultStreamMax,
-			Values: map[string]any{"group": "engine-ecu", "code": 0},
+			// int64 because an unrecognised code is reported under its own raw
+			// uint32, which would wrap when negated as an int32.
+			Values: map[string]any{"group": "engine-ecu", "code": -int64(prev)},
 		})
-	} else {
-		pipe.SAdd(tx.ctx, faultSetKey, uint32(fault))
+	}
+	if fault != FaultNone {
 		pipe.XAdd(tx.ctx, &redis.XAddArgs{
 			Stream: faultStreamKey,
 			MaxLen: faultStreamMax,
