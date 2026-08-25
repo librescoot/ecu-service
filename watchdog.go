@@ -131,7 +131,15 @@ func (w *CommLostWatcher) check() {
 		w.onChange(true)
 	case !shouldRaise && w.published:
 		w.published = false
-		w.log.Info("E20 cleared")
+		// Which of the two it is matters when reading a log after the fact. A
+		// clear on the power-off edge is not the ECU recovering, it is the fault
+		// becoming unreportable, and reading those as recovery understates how
+		// long an episode really lasted.
+		if !ecuPowered {
+			w.log.Info("E20 cleared (ECU power removed, not recovery)")
+		} else {
+			w.log.Info("E20 cleared (frame received after %.1fs)", w.ecu.TimeSinceLastFrame().Seconds())
+		}
 		w.onChange(false)
 	}
 }

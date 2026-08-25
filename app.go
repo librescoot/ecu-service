@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +47,11 @@ type App struct {
 	// fault code on every status frame, so logging unconditionally would bury
 	// the journal at the frame rate.
 	lastUnknownFault uint32
+
+	// frameCounts tallies received IDs for the periodic summary. Written from the
+	// CAN read goroutine and read by the summary goroutine, hence the mutex.
+	frameMu     sync.Mutex
+	frameCounts map[uint32]int
 }
 
 func NewApp(ctx context.Context, opts Options) (*App, error) {
@@ -140,7 +147,10 @@ func (a *App) onCommLostChange(raise bool) {
 }
 
 func (a *App) Run(ctx context.Context) error {
-	a.log.Info("ecu-service starting")
+	// Version in the banner, not just behind --version: a log package from the
+	// field is the only artifact we get, and without this line it cannot be tied
+	// to a build without guessing from image tags.
+	a.log.Info("ecu-service %s starting", version)
 
 	// Subscribe to Redis channels and sync initial state.
 	a.ipcRx.Start()
@@ -152,6 +162,9 @@ func (a *App) Run(ctx context.Context) error {
 
 	// Watch for ECU comm loss (raises E20).
 	go a.commLost.Run(ctx)
+
+	// Summarise what the controller is actually sending.
+	go a.runFrameSummary(ctx)
 
 	<-ctx.Done()
 	a.log.Info("Shutting down")
@@ -218,10 +231,71 @@ func (a *App) runCANBusLoop(ctx context.Context) {
 // appHandler implements can.Handler.
 type appHandler App
 
+// frameSummaryInterval is long enough that the line is a periodic reference
+// point rather than chatter, and short enough to localise a change to within a
+// minute when reading a log after the fact.
+const frameSummaryInterval = 60 * time.Second
+
+// runFrameSummary logs which IDs the controller sent and how many, once per
+// interval. Controllers differ in what they report and at what rate, and a
+// per-ID count distinguishes a full report from a subset and gives the rate
+// directly, neither of which can be recovered from the individual handlers.
+//
+// A period with no frames logs nothing: silence is already covered by the
+// frame-gap line and the at-rest line, and a stationary locked vehicle would
+// otherwise emit an empty summary every minute for as long as it sits there.
+func (a *App) runFrameSummary(ctx context.Context) {
+	ticker := time.NewTicker(frameSummaryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.logFrameSummary()
+		}
+	}
+}
+
+func (a *App) logFrameSummary() {
+	a.frameMu.Lock()
+	counts := a.frameCounts
+	a.frameCounts = make(map[uint32]int, len(counts))
+	a.frameMu.Unlock()
+
+	if len(counts) == 0 {
+		return
+	}
+	ids := make([]uint32, 0, len(counts))
+	total := 0
+	for id, n := range counts {
+		ids = append(ids, id)
+		total += n
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	var b strings.Builder
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		fmt.Fprintf(&b, "%03X x%d", id, counts[id])
+	}
+	a.log.Info("CAN %ds: %d frames from %d IDs: %s",
+		int(frameSummaryInterval.Seconds()), total, len(ids), b.String())
+}
+
 func (h *appHandler) Handle(frame can.Frame) {
 	a := (*App)(h)
 	a.log.DebugCAN("RX", frame.ID, frame.Data, frame.Length)
 	a.ecu.HandleFrame(frame)
+	a.frameMu.Lock()
+	if a.frameCounts == nil {
+		a.frameCounts = make(map[uint32]int)
+	}
+	a.frameCounts[frame.ID]++
+	a.frameMu.Unlock()
+
 	a.onFrame()
 }
 
