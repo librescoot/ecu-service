@@ -669,8 +669,12 @@ func (b *ECU) SetPowered(powered bool) {
 
 	if cmd == powerOff {
 		// Whatever we sent is void once the rail drops: the controller comes back
-		// with none of it, so the next reachable edge has to re-apply.
+		// with none of it, so the next reachable edge has to re-apply. That covers
+		// the gear ratios too, which are sent once per power-up and were latched
+		// for the life of the process, so every power cycle after the first left
+		// the controller running on its own defaults.
 		b.stateAppliedToECU = false
+		b.gearsSentOnPower = false
 		return
 	}
 	b.applyCommandedStateLocked()

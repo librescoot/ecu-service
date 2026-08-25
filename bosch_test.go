@@ -836,3 +836,50 @@ func TestSendKersState_EBSSetGoesOutEvenWhenRegenIsOff(t *testing.T) {
 		t.Errorf("Control frame armed regen (bit 2) when it was never enabled: %#02x", ctrl.Data[0])
 	}
 }
+
+// TestGearRatios_ResentAfterEachPowerCycle covers a flag that claimed to mean
+// "sent since the ECU last powered on" but was only ever set, never cleared. It
+// therefore meant "sent since this process started", so the second and every
+// later power-up left the controller running on its own gear defaults.
+func TestGearRatios_ResentAfterEachPowerCycle(t *testing.T) {
+	bus := &fakeBus{}
+	ecu := &ECU{
+		log:             newLogger(LogLevelNone),
+		bus:             bus,
+		kersVoltage:     DefaultKersVoltage,
+		gearRatioValues: []uint8{10, 20, 30},
+	}
+
+	status1 := makeFrame(frameStatus1, []byte{0, 0, 0, 0, 0, 0, 0, 0})
+
+	countGears := func() int {
+		n := 0
+		for _, f := range bus.sent {
+			if f.ID == frameGearControl {
+				n++
+			}
+		}
+		return n
+	}
+
+	ecu.SetPowered(true)
+	ecu.HandleFrame(status1)
+	if got := countGears(); got != 3 {
+		t.Fatalf("first power-up sent %d gear frames, want 3", got)
+	}
+
+	// Still once per power-up, not once per frame.
+	ecu.HandleFrame(status1)
+	if got := countGears(); got != 3 {
+		t.Fatalf("a second Status1 in the same power cycle re-sent gears: %d", got)
+	}
+
+	// Power cycle: the controller comes back with defaults, so they must go again.
+	ecu.SetPowered(false)
+	bus.sent = nil
+	ecu.SetPowered(true)
+	ecu.HandleFrame(status1)
+	if got := countGears(); got != 3 {
+		t.Fatalf("after a power cycle the gear ratios were sent %d times, want 3", got)
+	}
+}
