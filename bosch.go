@@ -147,6 +147,7 @@ type ECU struct {
 	firmwareVersion      uint32
 	warrantyDate         uint32
 	gearsSentOnPower     bool // whether gearRatioValues have been sent since the ECU last powered on
+	brakeFaultSeen       bool // edges the suppressed brake-applied log line
 	// powered mirrors vehicle[engine-power] && vehicle[main-power]. The ECU is
 	// only supplied in parked and ready-to-drive; frames sent while it is dark
 	// are never acknowledged, and enough unacknowledged frames walk the TX error
@@ -207,6 +208,10 @@ func newECU(bus *can.Bus, log *Logger, gearRatioValues []uint8) *ECU {
 		kersVoltage:     DefaultKersVoltage,
 	}
 }
+
+// faultCodeBrakeApplied is the controller's code for the engine brake line
+// being asserted. Named rather than inline so the suppression below is legible.
+const faultCodeBrakeApplied = 15
 
 // ecuSilenceLogAfter is the receive gap worth a log line. Deliberately below
 // the watchdog's raise threshold so gaps that never reach E20 still surface:
@@ -308,9 +313,22 @@ func (b *ECU) handleStatus2(frame can.Frame) {
 	b.temperature = int8(frame.Data[0])
 
 	code := binary.BigEndian.Uint32(frame.Data[2:6])
-	// Filter spurious fault code 15 (software brake in parking mode).
-	if code == 15 {
+	// Code 15 is the controller reporting that the engine brake line is
+	// asserted. The vehicle asserts it itself in every state except drive, as
+	// the interlock that stops a parked scooter riding off, so it is the system
+	// working rather than a defect. It must not reach fault:code: the dashboard
+	// toasts any non-zero code, which would mean a warning every time the rider
+	// parks. Suppressed here, but logged on its edges, because erasing it
+	// silently means we cannot tell how often controllers report it.
+	if code == faultCodeBrakeApplied {
+		if !b.brakeFaultSeen {
+			b.brakeFaultSeen = true
+			b.log.Info("ECU reports brake applied (code %d), suppressed: the vehicle asserts that line itself while parked", faultCodeBrakeApplied)
+		}
 		code = 0
+	} else if b.brakeFaultSeen {
+		b.brakeFaultSeen = false
+		b.log.Info("ECU no longer reports brake applied")
 	}
 	b.faultCode = code
 }

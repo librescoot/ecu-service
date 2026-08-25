@@ -18,13 +18,7 @@ const (
 	FaultThrottleAbnormal        Fault = 12
 	FaultMotorTempProtection     Fault = 13
 	FaultThrottleActiveAtPowerUp Fault = 14
-	// FaultBrakeApplied (E15) is the controller reporting that the engine brake
-	// line is asserted. The vehicle asserts it deliberately in every state except
-	// drive, as the interlock that stops a parked scooter riding off, so seeing
-	// it is the system working rather than a defect. Mapped so it is recognised
-	// and described, and marked Expected so it never reaches the fault set.
-	FaultBrakeApplied        Fault = 15
-	FaultInternal15vAbnormal Fault = 16
+	FaultInternal15vAbnormal     Fault = 16
 	// FaultECUCommLost (E20) is synthetic: raised by the comm-lost watchdog when
 	// the ECU should be powered but has gone silent. Not a CAN-reported code.
 	FaultECUCommLost Fault = 20
@@ -33,9 +27,6 @@ const (
 type FaultConfig struct {
 	Description string
 	Severity    string // "warning" or "critical"
-	// Expected marks a code the vehicle causes on purpose. It is described and
-	// published as the ECU's raw reading, but never enters the fault set.
-	Expected bool
 	// Unknown marks a code with no entry in faultMap. Callers log these once so
 	// gaps in the table surface from the field instead of being silently
 	// reported as a healthy vehicle.
@@ -55,7 +46,6 @@ var faultMap = map[uint32]Fault{
 	0x0C: FaultThrottleAbnormal,
 	0x0D: FaultMotorTempProtection,
 	0x0E: FaultThrottleActiveAtPowerUp,
-	0x0F: FaultBrakeApplied,
 	0x10: FaultInternal15vAbnormal,
 }
 
@@ -73,7 +63,6 @@ var faultConfigs = map[Fault]FaultConfig{
 	FaultInternal15vAbnormal:     {Description: "Internal 15V abnormal", Severity: "critical"},
 	FaultMotorTempProtection:     {Description: "Motor temperature protection", Severity: "warning"},
 	FaultThrottleActiveAtPowerUp: {Description: "Throttle active at power up", Severity: "warning"},
-	FaultBrakeApplied:            {Description: "Engine brake applied", Severity: "warning", Expected: true},
 	FaultECUCommLost:             {Description: "ECU communication lost", Severity: "critical"},
 }
 
@@ -89,11 +78,7 @@ func MapFault(code uint32) (Fault, FaultConfig) {
 		return FaultNone, FaultConfig{}
 	}
 	if f, ok := faultMap[code]; ok {
-		cfg := faultConfigs[f]
-		if cfg.Expected {
-			return FaultNone, cfg
-		}
-		return f, cfg
+		return f, faultConfigs[f]
 	}
 	// Severity is "warning" deliberately: we do not know what the code means, and
 	// crying critical over every gap in the table (0x08 and 0x09 are unassigned

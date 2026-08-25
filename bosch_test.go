@@ -489,23 +489,36 @@ func TestMapFault_Unknown(t *testing.T) {
 	}
 }
 
-// TestMapFault_BrakeAppliedIsExpected covers E15. The vehicle asserts the engine
-// brake itself in every state except drive, as the interlock that stops a parked
-// scooter riding off, so the controller reporting it back is the system working.
-// It must be described but must never reach the fault set.
-func TestMapFault_BrakeAppliedIsExpected(t *testing.T) {
-	f, cfg := MapFault(0x0F)
-	if f != FaultNone {
-		t.Errorf("E15 is self-inflicted and must not raise a fault, got %d", f)
+// TestHandleStatus2_BrakeAppliedIsSuppressedButLogged pins the E15 handling.
+// The vehicle asserts the engine brake itself in every state except drive, so
+// the controller reporting it back is expected. It must not reach fault:code,
+// because the dashboard toasts any non-zero code and the rider would get a
+// warning every time they park. It must still be logged, so the frequency can
+// be counted from field logs rather than erased.
+func TestHandleStatus2_BrakeAppliedIsSuppressedButLogged(t *testing.T) {
+	var buf bytes.Buffer
+	ecu, _ := newGatedECU()
+	ecu.log = &Logger{l: log.New(&buf, "", 0), level: LogLevelInfo}
+
+	brakeApplied := makeFrame(frameStatus2, []byte{20, 0, 0, 0, 0, faultCodeBrakeApplied, 0, 0})
+	for i := 0; i < 4; i++ {
+		ecu.HandleFrame(brakeApplied)
 	}
-	if !cfg.Expected {
-		t.Error("E15 should be flagged Expected")
+	if ecu.faultCode != 0 {
+		t.Fatalf("brake-applied code reached fault:code as %d, want 0", ecu.faultCode)
 	}
-	if cfg.Unknown {
-		t.Error("E15 is mapped, it must not be flagged Unknown")
+	if n := strings.Count(buf.String(), "brake applied"); n != 1 {
+		t.Errorf("four brake-applied frames logged %d times, want 1", n)
 	}
-	if cfg.Description == "" {
-		t.Error("E15 should still be described for diagnostics")
+
+	// A real fault in the same field must still come through untouched.
+	realFault := makeFrame(frameStatus2, []byte{20, 0, 0, 0, 0, 0x0B, 0, 0})
+	ecu.HandleFrame(realFault)
+	if ecu.faultCode != 0x0B {
+		t.Errorf("real fault code came through as %d, want 11", ecu.faultCode)
+	}
+	if !strings.Contains(buf.String(), "no longer reports brake applied") {
+		t.Error("leaving the brake-applied state should be logged too")
 	}
 }
 
