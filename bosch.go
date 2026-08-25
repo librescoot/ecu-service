@@ -690,15 +690,24 @@ func (b *ECU) applyCommandedStateLocked() {
 
 // sendKersStateLocked emits the frames that carry the currently commanded KERS
 // state. Callers hold b.mu.
+//
+// The EBS Set frame goes out unconditionally, including when regen is off. It
+// carries the regen voltage and current caps, which are configuration: whether
+// regen is actually allowed lives in bit 2 of the Control frame below. Sending
+// the caps only while regen happened to be enabled meant a controller powered
+// up in a state where regen is disallowed was never told its own limits, and
+// left our idea of its configuration and its own out of step until the first
+// time regen was enabled.
+//
+// Sending them on every state assertion is idempotent, costs one frame, and
+// keeps the two in step from the first assertion after power-on.
 func (b *ECU) sendKersStateLocked() {
-	if b.kersActive {
-		ebs := can.Frame{ID: frameEBSSet, Length: 4}
-		binary.BigEndian.PutUint16(ebs.Data[0:2], b.kersVoltage/10)
-		binary.BigEndian.PutUint16(ebs.Data[2:4], b.kersCurrent/10)
-		b.log.DebugCAN("TX", ebs.ID, ebs.Data, ebs.Length)
-		if err := b.publish(ebs, "EBS Set"); err != nil {
-			b.log.Error("Failed to send EBS Set frame: %v", err)
-		}
+	ebs := can.Frame{ID: frameEBSSet, Length: 4}
+	binary.BigEndian.PutUint16(ebs.Data[0:2], b.kersVoltage/10)
+	binary.BigEndian.PutUint16(ebs.Data[2:4], b.kersCurrent/10)
+	b.log.DebugCAN("TX", ebs.ID, ebs.Data, ebs.Length)
+	if err := b.publish(ebs, "EBS Set"); err != nil {
+		b.log.Error("Failed to send EBS Set frame: %v", err)
 	}
 
 	ctrl := can.Frame{ID: frameControl, Length: 1}

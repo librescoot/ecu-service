@@ -797,3 +797,42 @@ func TestHandleStatus5_LogsFirmwareOnlyOnChange(t *testing.T) {
 		t.Errorf("a changed Status5 payload logged %d times total, want 2", n)
 	}
 }
+
+// TestSendKersState_EBSSetGoesOutEvenWhenRegenIsOff pins that the regen caps are
+// configuration rather than an enable. The enable is bit 2 of the Control frame;
+// the caps describe the envelope the controller may use if and when regen is
+// allowed. Sending them only while regen was already on left a controller that
+// powered up with regen disallowed never told its own limits.
+func TestSendKersState_EBSSetGoesOutEvenWhenRegenIsOff(t *testing.T) {
+	ecu, bus := newGatedECU()
+	ecu.kersCurrent = DefaultKersCurrent
+	ecu.SetPowered(true) // regen has never been enabled
+
+	var ebs, ctrl *can.Frame
+	for i := range bus.sent {
+		switch bus.sent[i].ID {
+		case frameEBSSet:
+			ebs = &bus.sent[i]
+		case frameControl:
+			ctrl = &bus.sent[i]
+		}
+	}
+
+	if ebs == nil {
+		t.Fatalf("no EBS Set frame with regen off: %#x", bus.ids())
+	}
+	if got := binary.BigEndian.Uint16(ebs.Data[0:2]); got != DefaultKersVoltage/10 {
+		t.Errorf("EBS Set voltage cap = %d, want %d", got, DefaultKersVoltage/10)
+	}
+	if got := binary.BigEndian.Uint16(ebs.Data[2:4]); got != DefaultKersCurrent/10 {
+		t.Errorf("EBS Set current cap = %d, want %d", got, DefaultKersCurrent/10)
+	}
+
+	// Critical: configuring the caps must not arm regen.
+	if ctrl == nil {
+		t.Fatalf("no Control frame: %#x", bus.ids())
+	}
+	if ctrl.Data[0]&0x04 != 0 {
+		t.Errorf("Control frame armed regen (bit 2) when it was never enabled: %#02x", ctrl.Data[0])
+	}
+}
