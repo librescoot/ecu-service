@@ -20,19 +20,55 @@ const (
 	// reply latency (the 0x7E0-0x7E8 burst is spread over ~1s), so a fresh poll's
 	// own response has time to land before we'd flag comm lost.
 	commLostRaiseAfter = 3 * time.Second
+	// ecuColdStartWorst is the longest measured delay between engine_power going
+	// on and the controller's first CAN frame. It is not one number: it varies by
+	// controller by a factor of four, measured with `lsc engine on`, stationary,
+	// engine brake engaged.
+	//
+	//	replacement logic board   5.0s to 5.5s   (four cycles)
+	//	stock controller          1.1s to 1.4s   (three cycles, v1.2.1)
+	//
+	// Both are consistent across repeated cycles, so these are boot times and not
+	// warm-up effects. The grace window has to cover the slowest controller we
+	// know about, so this is the replacement board's figure. Measure again before
+	// assuming a new controller fits inside it.
+	ecuColdStartWorst = 5500 * time.Millisecond
 	// commLostPowerOnGrace suppresses E20 right after the ECU is powered, giving
-	// it time to boot and send its first frame.
-	commLostPowerOnGrace = 2 * time.Second
+	// it time to boot and send its first frame. It has to clear
+	// ecuColdStartWorst with margin: at 2s, every single power-on on the slower
+	// controller raised E20 for one to two and a half seconds, which the cluster
+	// renders as dashes for speed. That was invisible while the watchdog still
+	// gated on non-zero speed, because speed is 0 for the whole of the boot.
+	//
+	// A stock controller boots inside the old 2s on its own, so this window is
+	// generous there. That costs nothing: the only case that waits it out is an
+	// ECU that has sent no frame at all.
+	//
+	// Only the no-frame-yet case waits this long. Staleness is measured from the
+	// more recent of {last frame, power-on edge}, so the first frame to arrive
+	// ends the window on its own and a genuinely dead ECU is still reported,
+	// just at power-on + this rather than power-on + commLostRaiseAfter.
+	commLostPowerOnGrace = 8 * time.Second
 )
 
 // CommLostWatcher raises fault E20 when the ECU should be alive and powered but
 // hasn't sent a CAN frame within commLostRaiseAfter. It is gated on vehicle
 // engine-power && main-power (so it stays quiet during standby or when 48V is
-// down) and on a power-on grace window. It does not gate on speed: once up, a
-// powered ECU broadcasts Status frames unprompted whether or not it is moving
-// (measured on-vehicle), so frame staleness on its own is a sound signal and a
-// parked-but-powered ECU never raises the fault. The 0x4EF poll only covers the
-// gap before the first broadcast. Gating on speed hid a dead bus at standstill.
+// down) and on a power-on grace window wide enough for the ECU to boot. It does
+// not gate on speed: once up, a powered ECU broadcasts Status frames unprompted
+// whether or not it is moving, so frame staleness on its own is a sound signal
+// and a parked-but-powered ECU never raises the fault. The 0x4EF poll only
+// covers the gap before the first broadcast. Gating on speed hid a dead bus at
+// standstill.
+//
+// Measured stationary on two controllers. The rate differs by 20x, the gap that
+// this check actually depends on does not:
+//
+//	replacement logic board   ~200 frames/s
+//	stock controller          10 frames/s, largest gap 0.26s over 83s
+//
+// Both leave commLostRaiseAfter a wide margin, so a healthy bus does not trip
+// the check on either.
 type CommLostWatcher struct {
 	ipc      *ipc.Client
 	ecu      *ECU
