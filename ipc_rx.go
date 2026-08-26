@@ -93,9 +93,9 @@ func (rx *IPCRx) watchSettings() {
 		rx.ecu.SetBoostEnabled(val == "true")
 		return nil
 	})
-	// KERS enable/disable; defaults to enabled when unset or any non-"false".
+	// KERS enable/disable; defaults to enabled when unset.
 	w.OnField("engine-ecu.kers", func(val string) error {
-		enabled := val != "false"
+		enabled := kersSettingEnabled(val)
 		rx.log.Info("KERS enabled setting: %s (enabled=%v)", val, enabled)
 		rx.kers.SetSettingsEnabled(enabled)
 		return nil
@@ -140,6 +140,18 @@ func (rx *IPCRx) watchSettings() {
 	if err := w.StartWithSync(); err != nil {
 		rx.log.Error("settings watcher: %v", err)
 	}
+}
+
+// kersSettingEnabled reads settings[engine-ecu.kers]. The schema declares the
+// field an enum over "enabled"/"disabled", and that is what lsc, the BLE
+// settings write and the docs all use, so "disabled" has to be the off value.
+// "false" is accepted alongside it because that is what this service used to
+// require, and scooters carrying it in their persisted settings would
+// otherwise silently come back with regen enabled.
+//
+// Anything else, including an unset field, means enabled.
+func kersSettingEnabled(val string) bool {
+	return val != "disabled" && val != "false"
 }
 
 // applyKersPower picks the single- or dual-battery KERS current based on how
