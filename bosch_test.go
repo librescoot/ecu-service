@@ -883,3 +883,35 @@ func TestGearRatios_ResentAfterEachPowerCycle(t *testing.T) {
 		t.Fatalf("after a power cycle the gear ratios were sent %d times, want 3", got)
 	}
 }
+
+// logCapture returns a Logger writing into buf at Info level, so a test can
+// assert on what actually reached the journal.
+func logCapture(buf *bytes.Buffer) *Logger {
+	return &Logger{l: log.New(buf, "", 0), level: LogLevelInfo}
+}
+
+func TestSendKersState_LogsOnlyWhenFramesGoOut(t *testing.T) {
+	var buf bytes.Buffer
+	bus := &fakeBus{}
+	ecu := &ECU{log: logCapture(&buf), bus: bus, kersVoltage: DefaultKersVoltage}
+
+	// Gate shut: the command is recorded, nothing is sent, and nothing claims
+	// otherwise at Info.
+	ecu.SetKersEnabled(true)
+	if len(bus.sent) != 0 {
+		t.Fatalf("unpowered ECU sent %d frame(s): %#x", len(bus.sent), bus.ids())
+	}
+	if strings.Contains(buf.String(), "KERS -> ECU") {
+		t.Errorf("logged a KERS assertion while gated:\n%s", buf.String())
+	}
+
+	// Gate open: the re-assert goes out and says so.
+	buf.Reset()
+	ecu.SetPowered(true)
+	if len(bus.sent) != 2 {
+		t.Fatalf("expected EBS Set and Control on power-up, got %#x", bus.ids())
+	}
+	if !strings.Contains(buf.String(), "KERS -> ECU") {
+		t.Errorf("frames went out without a log line:\n%s", buf.String())
+	}
+}

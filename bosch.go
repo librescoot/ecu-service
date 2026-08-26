@@ -705,7 +705,17 @@ func (b *ECU) applyCommandedStateLocked() {
 //
 // Sending them on every state assertion is idempotent, costs one frame, and
 // keeps the two in step from the first assertion after power-on.
+//
+// The transmit gate is checked here rather than left to publish() so the log
+// line means the frames went out. Reached with the gate shut, publish() drops
+// both frames and says so only at Debug, which left an Info line claiming an
+// assertion that never made it onto the bus.
 func (b *ECU) sendKersStateLocked() {
+	if b.bus == nil || !b.mayTransmitLocked() {
+		b.log.Debug("ECU power %s, not asserting KERS state", b.powerCmd)
+		return
+	}
+
 	b.log.Info("KERS -> ECU: active=%v voltage=%dmV current=%dmA boost=%v",
 		b.kersActive, b.kersVoltage, b.kersCurrent, b.boostEnabled)
 
@@ -743,7 +753,7 @@ func (b *ECU) SetBoostEnabled(enabled bool) {
 	defer b.mu.Unlock()
 
 	b.boostEnabled = enabled
-	b.log.Info("Boost → %v", enabled)
+	b.log.Info("Boost -> %v", enabled)
 
 	ctrl := can.Frame{ID: frameControl, Length: 1}
 	ctrl.Data[0] = 0x01 |
@@ -773,7 +783,7 @@ func (b *ECU) SetKersVoltage(mV uint16) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if mV < MinKersVoltage || mV > MaxKersVoltage {
-		b.log.Warn("KERS voltage %d mV out of range [%d, %d] — ignoring", mV, MinKersVoltage, MaxKersVoltage)
+		b.log.Warn("KERS voltage %d mV out of range [%d, %d], ignoring", mV, MinKersVoltage, MaxKersVoltage)
 		return
 	}
 	if mV == b.kersVoltage {
