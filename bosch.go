@@ -157,11 +157,26 @@ type ECU struct {
 	// different facts, and collapsing them into one bool is what let a frame
 	// already in flight re-open the gate at the moment the rail was being cut.
 	powerCmd powerCommand
-	// stateAppliedToECU records whether the commanded KERS and boost state has
-	// been put on the wire since the ECU was last reachable. Frames raised while
-	// it was dark are dropped rather than queued, so this is what the re-send on
-	// the dark-to-reachable edge exists to repair.
-	stateAppliedToECU bool
+	// stateAssertedToECU records whether the commanded KERS and boost state has
+	// been put on the wire since the ECU was last reachable, stateAckedByECU
+	// whether the controller has since proved it was listening. Frames raised
+	// while it was dark are dropped rather than queued, so the assertion on the
+	// dark-to-reachable edge exists to repair that.
+	//
+	// Two facts, not one: a controller that is still booting acknowledges
+	// nothing, so an assertion that has gone out is not yet an assertion that
+	// landed, and only the second one may stop the re-assert.
+	stateAssertedToECU bool
+	stateAckedByECU    bool
+	// powerOnAt is when the rail was last commanded up. Blind assertions are
+	// held for ecuAssertHoldAfterPowerOn past it and abandoned at
+	// commLostPowerOnGrace, where E20 takes over.
+	powerOnAt time.Time
+	// sawFrame records whether a frame has ever arrived. lastFrameTime is
+	// seeded at construction so the watchdog does not read a fresh process as
+	// an ECU that has been silent since the epoch, which means it cannot double
+	// as "a frame has arrived" for the powerUnknown gate below.
+	sawFrame bool
 
 	// Status bits reported by the ECU (paired enable/disable flags, Status4)
 	ecuStatusEnabled bool
@@ -255,6 +270,19 @@ const faultCodeBrakeApplied = 15
 // used to be visible only as missing rows in a once-a-second firmware line.
 const ecuSilenceLogAfter = 2 * time.Second
 
+// ecuAssertHoldAfterPowerOn defers the first blind state assertion past the
+// controller's boot. A stock Bosch controller is up in ~1.2s; the replacement
+// board takes 5s and more. Asserting on the power edge put both frames on the
+// wire before anything could acknowledge them, and CAN hardware retransmits an
+// unacknowledged frame until it lands or the controller latches bus-off, so a
+// single early frame is enough to walk the TX error counter into
+// ERROR-PASSIVE.
+//
+// 1.5s clears the stock controller with margin and matches kersEngineOnDelay,
+// which defers the ready-to-drive write for the same reason. The slower board
+// is covered by the re-assert on the watchdog tick, not by this number.
+const ecuAssertHoldAfterPowerOn = 1500 * time.Millisecond
+
 func (b *ECU) HandleFrame(frame can.Frame) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -266,6 +294,7 @@ func (b *ECU) HandleFrame(frame can.Frame) {
 		b.log.Info("ECU frames resumed after %.1fs of silence", gap.Seconds())
 	}
 	b.lastFrameTime = time.Now()
+	b.sawFrame = true
 	// A frame is evidence the controller is alive, which is not the same fact as
 	// what vehicle-service commanded, so it deliberately does not write the power
 	// command. It only closes the gap the re-send exists for: anything commanded
@@ -276,7 +305,7 @@ func (b *ECU) HandleFrame(frame can.Frame) {
 	// still in flight while the rail was being cut flip the state back and forth
 	// at the watchdog tick, transmitting into a controller that was losing supply
 	// on every flip.
-	b.applyCommandedStateLocked()
+	b.applyCommandedStateLocked(true)
 
 	switch frame.ID {
 	case frameStatus1:
@@ -631,7 +660,7 @@ func (b *ECU) mayTransmitLocked() bool {
 	case powerOn:
 		return true
 	case powerUnknown:
-		return time.Since(b.lastFrameTime) < ecuSilenceLogAfter
+		return b.sawFrame && time.Since(b.lastFrameTime) < ecuSilenceLogAfter
 	default:
 		return false
 	}
@@ -673,23 +702,60 @@ func (b *ECU) SetPowered(powered bool) {
 		// the gear ratios too, which are sent once per power-up and were latched
 		// for the life of the process, so every power cycle after the first left
 		// the controller running on its own defaults.
-		b.stateAppliedToECU = false
+		b.stateAssertedToECU = false
+		b.stateAckedByECU = false
 		b.gearsSentOnPower = false
 		return
 	}
-	b.applyCommandedStateLocked()
+	// No assertion from the power edge itself. The controller needs a beat to
+	// boot, and the watchdog tick that called us comes back every 500ms to make
+	// the attempt once ecuAssertHoldAfterPowerOn has passed.
+	b.powerOnAt = time.Now()
 }
 
 // applyCommandedStateLocked puts the commanded KERS and boost state on the wire
-// if that has not already happened since the ECU was last reachable. Idempotent,
-// so it is safe to call from both the command edge and the first frame without
-// the two duplicating each other. Callers hold b.mu.
-func (b *ECU) applyCommandedStateLocked() {
-	if b.stateAppliedToECU || !b.mayTransmitLocked() {
+// if the controller has not already acknowledged it. Callers hold b.mu.
+//
+// heard says the caller knows the controller is listening right now, because it
+// just sent us a frame. Without it the assertion is a blind probe: the Control
+// frame is answered with 0x7E4, which is what makes it a probe at all, but a
+// controller that is still booting answers nothing and the frame is lost.
+//
+// So a blind assertion waits out ecuAssertHoldAfterPowerOn and then repeats on
+// every watchdog tick until the controller speaks, giving up at
+// commLostPowerOnGrace where E20 reports the silence instead.
+//
+// Frame arrival always asserts once, even after those blind attempts. They may
+// all have gone into a controller that was not up yet, and nothing on the wire
+// distinguishes "it heard us" from "it booted on its own", so the arriving
+// frame re-asserts rather than assuming.
+func (b *ECU) applyCommandedStateLocked(heard bool) {
+	if b.stateAckedByECU || !b.mayTransmitLocked() {
 		return
 	}
-	b.stateAppliedToECU = true
-	b.sendKersStateLocked()
+	if !heard {
+		since := time.Since(b.powerOnAt)
+		if since < ecuAssertHoldAfterPowerOn || since > commLostPowerOnGrace {
+			return
+		}
+	}
+	// A blind retry is the same assertion again, once per watchdog tick until
+	// the controller answers. Announcing each one buried the two that carry
+	// information, the first attempt and the one the controller heard, under
+	// half a dozen identical lines on every power-on.
+	repeat := b.stateAssertedToECU && !heard
+	b.stateAssertedToECU = true
+	b.stateAckedByECU = heard
+	b.sendKersStateLocked(repeat)
+}
+
+// ApplyCommandedState re-asserts the commanded state if the controller has not
+// acknowledged it yet. Driven by the watchdog tick, which is the only thing that
+// knows the rail is up.
+func (b *ECU) ApplyCommandedState() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.applyCommandedStateLocked(false)
 }
 
 // sendKersStateLocked emits the frames that carry the currently commanded KERS
@@ -710,13 +776,17 @@ func (b *ECU) applyCommandedStateLocked() {
 // line means the frames went out. Reached with the gate shut, publish() drops
 // both frames and says so only at Debug, which left an Info line claiming an
 // assertion that never made it onto the bus.
-func (b *ECU) sendKersStateLocked() {
+func (b *ECU) sendKersStateLocked(quiet bool) {
 	if b.bus == nil || !b.mayTransmitLocked() {
 		b.log.Debug("ECU power %s, not asserting KERS state", b.powerCmd)
 		return
 	}
 
-	b.log.Info("KERS -> ECU: active=%v voltage=%dmV current=%dmA boost=%v",
+	announce := b.log.Info
+	if quiet {
+		announce = b.log.Debug
+	}
+	announce("KERS -> ECU: active=%v voltage=%dmV current=%dmA boost=%v",
 		b.kersActive, b.kersVoltage, b.kersCurrent, b.boostEnabled)
 
 	ebs := can.Frame{ID: frameEBSSet, Length: 4}
@@ -744,25 +814,21 @@ func (b *ECU) SetKersEnabled(enabled bool) {
 	defer b.mu.Unlock()
 
 	b.kersActive = enabled
-	b.sendKersStateLocked()
+	b.sendKersStateLocked(false)
 }
 
-// SetBoostEnabled updates the boost flag and sends an updated Control frame.
+// SetBoostEnabled updates the boost flag and asserts it. Boost rides in the
+// same Control frame as the KERS bit, so this goes through the one sender
+// rather than building a second copy of the frame: two builders meant two
+// origins for an 0x4E0 on the wire, and telling them apart afterwards cost a
+// firmware teardown.
 func (b *ECU) SetBoostEnabled(enabled bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	b.boostEnabled = enabled
 	b.log.Info("Boost -> %v", enabled)
-
-	ctrl := can.Frame{ID: frameControl, Length: 1}
-	ctrl.Data[0] = 0x01 |
-		boolBit(enabled, 1) |
-		boolBit(b.kersActive, 2)
-	b.log.DebugCAN("TX", ctrl.ID, ctrl.Data, ctrl.Length)
-	if err := b.publish(ctrl, "Control"); err != nil {
-		b.log.Error("Failed to send Control frame: %v", err)
-	}
+	b.sendKersStateLocked(false)
 }
 
 // SetKersCurrent sets the KERS regen current (mA) used in the EBS Set frame on

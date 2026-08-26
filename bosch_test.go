@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/brutella/can"
 )
@@ -557,6 +558,18 @@ func (f *fakeBus) ids() []uint32 {
 	return out
 }
 
+// powerUpAndAssert powers the ECU and advances past the assertion hold, then
+// makes the blind attempt the watchdog tick would make. The hold means the
+// power edge no longer transmits by itself, so tests that care about the
+// re-applied state have to reach the tick that follows it.
+func powerUpAndAssert(ecu *ECU) {
+	ecu.SetPowered(true)
+	ecu.mu.Lock()
+	ecu.powerOnAt = time.Now().Add(-ecuAssertHoldAfterPowerOn)
+	ecu.mu.Unlock()
+	ecu.ApplyCommandedState()
+}
+
 // newGatedECU returns an ECU wired to a fakeBus, unpowered.
 func newGatedECU() (*ECU, *fakeBus) {
 	bus := &fakeBus{}
@@ -597,9 +610,9 @@ func TestSetKersEnabled_DroppedWhileUnpoweredThenReappliedOnPowerUp(t *testing.T
 		t.Fatal("commanded KERS state was not recorded while unpowered")
 	}
 
-	// Power arrives: the commanded state goes out without the caller re-asking,
-	// since frames are dropped rather than queued.
-	ecu.SetPowered(true)
+	// Power arrives, and the tick after the boot hold puts the commanded state
+	// out without the caller re-asking, since frames are dropped not queued.
+	powerUpAndAssert(ecu)
 
 	ids := bus.ids()
 	if len(ids) != 2 || ids[0] != frameEBSSet || ids[1] != frameControl {
@@ -687,7 +700,7 @@ func TestSetPowered_OffThenOnReappliesState(t *testing.T) {
 	ecu.SetPowered(false)
 	bus.sent = nil
 
-	ecu.SetPowered(true)
+	powerUpAndAssert(ecu)
 
 	if len(bus.sent) == 0 {
 		t.Fatal("power returning did not re-apply the commanded state")
@@ -806,7 +819,7 @@ func TestHandleStatus5_LogsFirmwareOnlyOnChange(t *testing.T) {
 func TestSendKersState_EBSSetGoesOutEvenWhenRegenIsOff(t *testing.T) {
 	ecu, bus := newGatedECU()
 	ecu.kersCurrent = DefaultKersCurrent
-	ecu.SetPowered(true) // regen has never been enabled
+	powerUpAndAssert(ecu) // regen has never been enabled
 
 	var ebs, ctrl *can.Frame
 	for i := range bus.sent {
@@ -907,11 +920,144 @@ func TestSendKersState_LogsOnlyWhenFramesGoOut(t *testing.T) {
 
 	// Gate open: the re-assert goes out and says so.
 	buf.Reset()
-	ecu.SetPowered(true)
+	powerUpAndAssert(ecu)
 	if len(bus.sent) != 2 {
 		t.Fatalf("expected EBS Set and Control on power-up, got %#x", bus.ids())
 	}
 	if !strings.Contains(buf.String(), "KERS -> ECU") {
 		t.Errorf("frames went out without a log line:\n%s", buf.String())
+	}
+}
+
+// TestApplyCommandedState_HeldUntilTheControllerHasBooted is the regression
+// case for the boot race. The power edge used to assert immediately, putting
+// both frames on the wire seconds before the controller could acknowledge
+// them. CAN hardware then retransmits the unacknowledged frame until it lands
+// or the controller latches bus-off, so one early frame was enough to walk the
+// bus into ERROR-PASSIVE on every ride.
+func TestApplyCommandedState_HeldUntilTheControllerHasBooted(t *testing.T) {
+	ecu, bus := newGatedECU()
+	ecu.SetKersEnabled(true)
+
+	ecu.SetPowered(true)
+	if len(bus.sent) != 0 {
+		t.Fatalf("power edge transmitted into a booting controller: %#x", bus.ids())
+	}
+
+	// Still inside the hold.
+	ecu.ApplyCommandedState()
+	if len(bus.sent) != 0 {
+		t.Fatalf("asserted %d frame(s) before the hold elapsed: %#x", len(bus.sent), bus.ids())
+	}
+
+	ecu.mu.Lock()
+	ecu.powerOnAt = time.Now().Add(-ecuAssertHoldAfterPowerOn)
+	ecu.mu.Unlock()
+	ecu.ApplyCommandedState()
+
+	if ids := bus.ids(); len(ids) != 2 || ids[0] != frameEBSSet || ids[1] != frameControl {
+		t.Fatalf("expected EBS Set then Control after the hold, got %#x", ids)
+	}
+}
+
+// TestApplyCommandedState_RepeatsUntilTheControllerSpeaks covers the slow
+// controller. It answers a Control frame with 0x7E4 but ignores a status
+// request until it has booted, so the assertion is the probe and repeating it
+// is what gets a 5s-boot board both configured and talking.
+func TestApplyCommandedState_RepeatsUntilTheControllerSpeaks(t *testing.T) {
+	ecu, bus := newGatedECU()
+	ecu.SetKersEnabled(true)
+	ecu.SetPowered(true)
+	ecu.mu.Lock()
+	ecu.powerOnAt = time.Now().Add(-ecuAssertHoldAfterPowerOn)
+	ecu.mu.Unlock()
+
+	for i := 0; i < 3; i++ {
+		ecu.ApplyCommandedState()
+	}
+	if len(bus.sent) != 6 {
+		t.Fatalf("three silent ticks produced %d frame(s), want 6: %#x", len(bus.sent), bus.ids())
+	}
+
+	// The controller speaks. That acknowledges the assertion, and further ticks
+	// stop sending.
+	ecu.HandleFrame(makeFrame(frameStatus1, []byte{0, 0, 0, 0, 0, 0, 0, 0}))
+	bus.sent = nil
+	for i := 0; i < 3; i++ {
+		ecu.ApplyCommandedState()
+	}
+	if len(bus.sent) != 0 {
+		t.Fatalf("kept asserting after the controller answered: %#x", bus.ids())
+	}
+}
+
+// TestApplyCommandedState_GivesUpAtTheGraceWindow stops the blind probe where
+// the watchdog starts reporting the silence as E20 instead. A frame arriving
+// later still asserts, so giving up costs nothing.
+func TestApplyCommandedState_GivesUpAtTheGraceWindow(t *testing.T) {
+	ecu, bus := newGatedECU()
+	ecu.SetKersEnabled(true)
+	ecu.SetPowered(true)
+	ecu.mu.Lock()
+	ecu.powerOnAt = time.Now().Add(-commLostPowerOnGrace - time.Second)
+	ecu.mu.Unlock()
+
+	ecu.ApplyCommandedState()
+	if len(bus.sent) != 0 {
+		t.Fatalf("still probing past the grace window: %#x", bus.ids())
+	}
+
+	// A controller that turns up late is configured off its first frame.
+	ecu.HandleFrame(makeFrame(frameStatus1, []byte{0, 0, 0, 0, 0, 0, 0, 0}))
+	if ids := bus.ids(); len(ids) != 2 || ids[0] != frameEBSSet || ids[1] != frameControl {
+		t.Fatalf("late controller was not configured off its first frame, got %#x", ids)
+	}
+}
+
+// TestMayTransmit_UnknownPowerNeedsARealFrame guards the fabricated evidence.
+// lastFrameTime is seeded at construction so the watchdog does not read a fresh
+// process as an ECU silent since the epoch, which made "unknown power, but a
+// frame arrived recently" true before any frame had arrived, and let the
+// settings sync transmit into a rail that was down.
+func TestMayTransmit_UnknownPowerNeedsARealFrame(t *testing.T) {
+	ecu, bus := newGatedECU()
+
+	if ecu.powerCmd != powerUnknown {
+		t.Fatalf("fresh ECU power command is %s, want unknown", ecu.powerCmd)
+	}
+	ecu.SetBoostEnabled(true)
+	if len(bus.sent) != 0 {
+		t.Fatalf("transmitted %d frame(s) before any frame proved the ECU alive: %#x", len(bus.sent), bus.ids())
+	}
+}
+
+// TestApplyCommandedState_RetriesDoNotRepeatTheAnnouncement keeps the assertion
+// log readable. The retry runs on the watchdog tick, so a controller that takes
+// 5s to boot draws around seven attempts, and announcing each one buries the
+// two lines that carry information under identical noise on every power-on.
+func TestApplyCommandedState_RetriesDoNotRepeatTheAnnouncement(t *testing.T) {
+	var buf bytes.Buffer
+	bus := &fakeBus{}
+	ecu := &ECU{log: logCapture(&buf), bus: bus, kersVoltage: DefaultKersVoltage}
+	ecu.SetPowered(true)
+	ecu.mu.Lock()
+	ecu.powerOnAt = time.Now().Add(-ecuAssertHoldAfterPowerOn)
+	ecu.mu.Unlock()
+
+	for i := 0; i < 5; i++ {
+		ecu.ApplyCommandedState()
+	}
+	if len(bus.sent) != 10 {
+		t.Fatalf("five attempts sent %d frame(s), want 10", len(bus.sent))
+	}
+	if got := strings.Count(buf.String(), "KERS -> ECU"); got != 1 {
+		t.Errorf("five blind attempts announced %d times, want 1:\n%s", got, buf.String())
+	}
+
+	// The one the controller demonstrably heard gets a line of its own.
+	buf.Reset()
+	ecu.HandleFrame(makeFrame(frameStatus1, []byte{0, 0, 0, 0, 0, 0, 0, 0}))
+	if got := strings.Count(buf.String(), "KERS -> ECU"); got != 1 {
+		t.Errorf("the acknowledged assertion announced %d times, want 1:\n%s", got, buf.String())
 	}
 }

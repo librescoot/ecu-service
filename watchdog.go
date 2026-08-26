@@ -121,6 +121,11 @@ func (w *CommLostWatcher) check() {
 	// and the KERS setters would keep talking to an unpowered ECU, and the
 	// unacknowledged frames eventually latch the controller bus-off.
 	w.ecu.SetPowered(ecuPowered)
+	// Re-assert the commanded KERS and boost state until the controller answers.
+	// The Control frame is answered with 0x7E4 where a status request is ignored
+	// until the controller has booted, so this, not RequestStatus, is what gets a
+	// slow-booting ECU both configured and talking. No-ops once acknowledged.
+	w.ecu.ApplyCommandedState()
 
 	shouldRaise := w.evaluate(ecuPowered)
 
