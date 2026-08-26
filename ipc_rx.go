@@ -106,6 +106,7 @@ func (rx *IPCRx) watchSettings() {
 			rx.log.Error("invalid engine-ecu.kers-power %q: %v", val, err)
 			return nil
 		}
+		rx.log.Info("KERS power setting (single): %d mA", mA)
 		rx.mu.Lock()
 		rx.kersPowerSingle = uint16(mA)
 		rx.mu.Unlock()
@@ -118,6 +119,7 @@ func (rx *IPCRx) watchSettings() {
 			rx.log.Error("invalid engine-ecu.kers-power-dual %q: %v", val, err)
 			return nil
 		}
+		rx.log.Info("KERS power setting (dual): %d mA", mA)
 		rx.mu.Lock()
 		rx.kersPowerDual = uint16(mA)
 		rx.hasDualPower = true
@@ -131,6 +133,7 @@ func (rx *IPCRx) watchSettings() {
 			rx.log.Error("invalid engine-ecu.kers-voltage %q: %v", val, err)
 			return nil
 		}
+		rx.log.Info("KERS voltage setting: %d mV", mV)
 		rx.ecu.SetKersVoltage(uint16(mV))
 		return nil
 	})

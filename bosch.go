@@ -706,6 +706,9 @@ func (b *ECU) applyCommandedStateLocked() {
 // Sending them on every state assertion is idempotent, costs one frame, and
 // keeps the two in step from the first assertion after power-on.
 func (b *ECU) sendKersStateLocked() {
+	b.log.Info("KERS -> ECU: active=%v voltage=%dmV current=%dmA boost=%v",
+		b.kersActive, b.kersVoltage, b.kersCurrent, b.boostEnabled)
+
 	ebs := can.Frame{ID: frameEBSSet, Length: 4}
 	binary.BigEndian.PutUint16(ebs.Data[0:2], b.kersVoltage/10)
 	binary.BigEndian.PutUint16(ebs.Data[2:4], b.kersCurrent/10)
@@ -730,7 +733,6 @@ func (b *ECU) SetKersEnabled(enabled bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.log.Info("KERS: %v (boost=%v)", enabled, b.boostEnabled)
 	b.kersActive = enabled
 	b.sendKersStateLocked()
 }
@@ -762,7 +764,7 @@ func (b *ECU) SetKersCurrent(mA uint16) {
 		return // suppress redundant work/logs on frequent battery updates
 	}
 	b.kersCurrent = mA
-	b.log.Info("KERS current set to %d mA", mA)
+	b.log.Debug("KERS current cached: %d mA (applies on next enable)", mA)
 }
 
 // SetKersVoltage sets the KERS regen voltage (mV), clamped to the safe range,
@@ -778,7 +780,7 @@ func (b *ECU) SetKersVoltage(mV uint16) {
 		return // suppress redundant work/logs
 	}
 	b.kersVoltage = mV
-	b.log.Info("KERS voltage set to %d mV", mV)
+	b.log.Debug("KERS voltage cached: %d mV (applies on next enable)", mV)
 }
 
 // KersECUEnabled returns the KERS state as reported by the ECU in Status4.
