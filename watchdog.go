@@ -113,6 +113,10 @@ func (w *CommLostWatcher) check() {
 		return
 	}
 	state := fields["state"]
+	// Refresh the state here as well as in the watcher: this tick owns the
+	// power-up assertion, so it must not send parked KERS while waiting for a
+	// Redis subscription update.
+	w.ecu.SetParked(state == "parked")
 	// ECU is expected to talk iff vehicle-service commanded engine-power ON and
 	// the battery supplies the 48V rail (main-power ON). Both must hold.
 	ecuPowered := fields["engine-power"] == "on" && fields["main-power"] == "on"

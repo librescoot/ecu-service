@@ -48,6 +48,7 @@ func (rx *IPCRx) watchVehicle() {
 	w := rx.client.NewHashWatcher("vehicle")
 	w.OnField("state", func(state string) error {
 		rx.log.Info("Vehicle state: %s", state)
+		rx.ecu.SetParked(state == "parked")
 		rx.kers.SetReadyToDrive(state == "ready-to-drive")
 		return nil
 	})

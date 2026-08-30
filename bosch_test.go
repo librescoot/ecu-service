@@ -960,6 +960,31 @@ func TestApplyCommandedState_HeldUntilTheControllerHasBooted(t *testing.T) {
 	}
 }
 
+func TestApplyCommandedState_ParkedPowerUpDisablesKERS(t *testing.T) {
+	ecu, bus := newGatedECU()
+	ecu.SetKersEnabled(true)
+	ecu.SetParked(true)
+	ecu.SetPowered(true)
+	ecu.mu.Lock()
+	ecu.powerOnAt = time.Now().Add(-ecuAssertHoldAfterPowerOn)
+	ecu.mu.Unlock()
+
+	ecu.ApplyCommandedState()
+	if got, want := len(bus.sent), 2; got != want {
+		t.Fatalf("sent %d frames, want %d: %#x", got, want, bus.ids())
+	}
+	control := bus.sent[1]
+	if control.ID != frameControl {
+		t.Fatalf("second frame ID = %#x, want Control %#x", control.ID, frameControl)
+	}
+	if control.Data[0]&0x04 != 0 {
+		t.Errorf("parked Control frame enabled KERS: %#x", control.Data[0])
+	}
+	if !ecu.KersPolicyEnabled() {
+		t.Error("parked assertion changed the commanded KERS policy")
+	}
+}
+
 // TestApplyCommandedState_RepeatsUntilTheControllerSpeaks covers the slow
 // controller. It answers a Control frame with 0x7E4 but ignores a status
 // request until it has booted, so the assertion is the probe and repeating it

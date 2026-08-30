@@ -157,6 +157,10 @@ type ECU struct {
 	// different facts, and collapsing them into one bool is what let a frame
 	// already in flight re-open the gate at the moment the rail was being cut.
 	powerCmd powerCommand
+	// parked is the vehicle state used for the first controller assertion after
+	// power-up. Parked controllers still need the Control probe to answer the
+	// watchdog, but KERS must remain disabled so the scooter stays pushable.
+	parked bool
 	// stateAssertedToECU records whether the commanded KERS and boost state has
 	// been put on the wire since the ECU was last reachable, stateAckedByECU
 	// whether the controller has since proved it was listening. Frames raised
@@ -679,6 +683,15 @@ func (b *ECU) publish(frame can.Frame, what string) error {
 	return b.bus.Publish(frame)
 }
 
+// SetParked records whether vehicle-service currently has the scooter parked.
+// It changes only the effective KERS bit sent to the ECU; the user's commanded
+// KERS policy remains intact and is re-applied on ready-to-drive.
+func (b *ECU) SetParked(parked bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.parked = parked
+}
+
 // SetPowered records what the vehicle hash says about the ECU's supply. This is
 // the only writer of the power command: a received frame is evidence the
 // controller is alive, which is a different fact and is handled separately.
@@ -786,8 +799,9 @@ func (b *ECU) sendKersStateLocked(quiet bool) {
 	if quiet {
 		announce = b.log.Debug
 	}
+	effectiveKers := b.kersActive && !b.parked
 	announce("KERS -> ECU: active=%v voltage=%dmV current=%dmA boost=%v",
-		b.kersActive, b.kersVoltage, b.kersCurrent, b.boostEnabled)
+		effectiveKers, b.kersVoltage, b.kersCurrent, b.boostEnabled)
 
 	ebs := can.Frame{ID: frameEBSSet, Length: 4}
 	binary.BigEndian.PutUint16(ebs.Data[0:2], b.kersVoltage/10)
@@ -800,7 +814,7 @@ func (b *ECU) sendKersStateLocked(quiet bool) {
 	ctrl := can.Frame{ID: frameControl, Length: 1}
 	ctrl.Data[0] = 0x01 | // gear mode always enabled (bit 0)
 		boolBit(b.boostEnabled, 1) |
-		boolBit(b.kersActive, 2)
+		boolBit(effectiveKers, 2)
 	b.log.DebugCAN("TX", ctrl.ID, ctrl.Data, ctrl.Length)
 	if err := b.publish(ctrl, "Control"); err != nil {
 		b.log.Error("Failed to send Control frame: %v", err)
