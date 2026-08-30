@@ -1,73 +1,94 @@
-# ecu-service
+# Librescoot ECU Service
 
-Interfaces with the Bosch ECU (motor controller) over CAN and bridges it to
-Redis. Reads the ECU's status frames, publishes vehicle metrics, manages KERS
-regenerative braking, and reports motor faults.
+Part of the [Librescoot](https://librescoot.org/) open-source platform.
 
-Part of the [Librescoot](https://librescoot.org/) platform. Bosch-only; there
-is no Votol support.
+`ecu-service` bridges a supported Bosch motor controller from SocketCAN to the
+Librescoot Redis IPC surface. It is intended to run on the vehicle, alongside
+Redis and the CAN interface connected to the controller. On unu vehicles, the
+Bosch ECU is a licensed, white-labeled Lingbo LBMC controller with CAN support.
 
-## What it does
+## Capabilities
 
-- Parses the Bosch status frames (`0x7E0`-`0x7E8`): speed, RPM, voltage,
-  current, power, temperature, odometer, fault code, gear, firmware version.
-- Publishes them to the `engine-ecu` Redis hash, writing only changed fields.
-- Manages KERS: enables regen only while stopped and engine-ready, with the
-  battery in an acceptable temperature band and not disabled via settings;
-  defers the engine-on write ~1.5s for the ECU to initialize, and forces the
-  ECU back off if it re-enables regen on a cold/hot pack.
-- Raises an `E20` comm-lost fault when the ECU is powered but stops talking,
-  and reconnects the CAN socket automatically across suspend/resume.
+- Decodes ECU status, configuration, gear, and diagnostic frames.
+- Publishes motor telemetry, controller-reported configuration, and fault state.
+- Applies boost and regenerative-braking (KERS) settings from Redis.
+- Gates KERS on vehicle readiness, vehicle speed, and the temperature/state of
+  active batteries.
+- Reconnects its CAN socket after it becomes stale, such as across suspend and
+  resume.
 
-## Build
+## Operation and Redis interface
+
+The service reads the Bosch ECU from the configured CAN interface and maintains
+the `engine-ecu` hash. Its fields include motor voltage/current, speed, RPM,
+power, energy counters, temperature, odometer, brake and throttle states,
+controller KERS/boost state, gear information, firmware details, and decoded
+configuration when the ECU reports it.
+
+The `engine-ecu` pub/sub channel carries field names for selected events,
+including `throttle`, `odometer`, `kers`, `kers-reason-off`,
+`regen-available`, and `fault`. Consumers should read the hash after a
+notification rather than treating the notification as a value payload.
+
+Fault presence is stored in `engine-ecu:fault`; changes are also appended to
+`events:faults` with group `engine-ecu`. The service watches `vehicle.state`,
+`battery:0`, and `battery:1` to determine KERS eligibility. Battery state is
+considered active only when its `state` field is `active`.
+
+### Controller power-on behavior
+
+The service does not immediately assert KERS and boost state when ECU power is
+commanded on. It waits for the controller's initial boot period, then retries
+that assertion from the watchdog until an incoming CAN frame confirms the
+controller is listening. This prevents unacknowledged control frames from
+being retransmitted while the controller is still booting. State changes made
+while ECU power is off are not queued; the current commanded state is asserted
+when the controller becomes reachable.
+
+## Configuration
+
+Runtime configuration is provided by command-line flags. Run
+`bin/ecu-service -help` after building for the authoritative flag list. The
+main deployment choices are the Redis address and port, the CAN interface
+(default `can0`), log level, and optional Bosch gear ratios.
+
+The following fields in the Redis `settings` hash are watched at startup and on
+change:
+
+- `engine-ecu.boost`
+- `engine-ecu.kers`
+- `engine-ecu.kers-power`
+- `engine-ecu.kers-power-dual`
+- `engine-ecu.kers-voltage`
+
+KERS treats `disabled` (and the legacy value `false`) as off; an unset value is
+enabled. Current and voltage values are passed to the controller, so restrict
+write access to these settings to trusted vehicle-management components.
+
+## Build and test
+
+The Makefile uses Go 1.25.7 for its build and test targets.
 
 ```bash
-make build        # ARM (armv7), production target
-make build-host   # local platform, for development
+make build        # Linux ARMv7 binary: bin/ecu-service
+make build-host   # local-development binary: bin/ecu-service
 make test
+make lint         # requires golangci-lint
 ```
 
-Cross-compilation uses `GOTOOLCHAIN=go1.25.7`, `CGO_ENABLED=0`, static linking.
+## Deployment and operations
 
-## Run
+The Yocto layer ships `librescoot-ecu.service`, which requires Valkey and
+starts after the vehicle and battery services. The runtime requires a reachable
+Redis-compatible datastore and permission to open the configured SocketCAN
+interface.
 
-```bash
-ecu-service [flags]
-```
+The service handles `SIGINT` and `SIGTERM`. Loss of ECU communication while the
+controller is powered is reported as the synthetic `E20` fault; investigate the
+CAN path and controller power state before clearing or acting on that report.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-log` | `3` | Log level (0=none 1=error 2=warn 3=info 4=debug) |
-| `-redis_server` | `127.0.0.1` | Redis address |
-| `-redis_port` | `6379` | Redis port |
-| `-can_device` | `can0` | CAN interface |
-| `-version` | | Print version and exit |
+## License
 
-When run under systemd/journald, timestamps are left to the journal.
+This project is licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](LICENSE).
 
-## Redis interface
-
-Publishes the `engine-ecu` hash: `motor:voltage`, `motor:current`, `rpm`,
-`speed`, `raw-speed`, `throttle`, `brake`, `power`, `energy:consumed`,
-`energy:recovered`, `temperature`, `fault:code`, `fault:description`,
-`odometer`, `kers`, `boost`, `kers-reason-off`, `gear`, `fw-version`.
-Change notifications all go out on the `engine-ecu` channel, with the name of
-the field that changed as the message: `throttle`, `odometer`, `kers`,
-`kers-reason-off`, `regen-available`, and `fault`.
-
-Faults are written to the `engine-ecu:fault` set and the `events:faults`
-stream. A raise carries the positive code, a clear the same code negated, so
-the two can be paired up. The `kers` and `boost` fields reflect the state the
-ECU acknowledges (Status4), not the commanded value.
-
-Consumes vehicle state (`vehicle.state`), battery state and temperature
-(`battery:0`, `battery:1`), and these settings:
-
-- `engine-ecu.boost` - boost mode
-- `engine-ecu.kers` - KERS enable/disable (default enabled)
-- `engine-ecu.kers-power` - regen current (mA), single battery
-- `engine-ecu.kers-power-dual` - regen current (mA) when both batteries active
-- `engine-ecu.kers-voltage` - regen target voltage (mV), clamped 42000-58000
-
-See [tech-reference](https://github.com/librescoot/unu-tech-reference) for the
-full Redis and fault-code documentation.
+Made with ❤️ by the Librescoot community
