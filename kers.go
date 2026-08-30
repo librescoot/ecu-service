@@ -92,10 +92,8 @@ func (k *KERSController) updateKers() {
 		return
 	}
 
-	// Re-assert unconditionally (matching the OEM and v1): every update while
-	// stopped+ready re-sends the enable/disable command, so the reconcile path
-	// (UpdateECUKers) can force the ECU back off when it has drifted on. Gating
-	// this on a local change flag would let a spurious ECU re-enable persist.
+	// Re-assert while stopped and ready so reconciliation can turn KERS off again
+	// if the ECU has drifted from the commanded state.
 	callEnable := k.engineReady
 	var newEnabled bool
 	if callEnable {

@@ -411,7 +411,7 @@ func (b *ECU) handleStatus3(frame can.Frame) {
 	}
 
 	raw := binary.BigEndian.Uint32(frame.Data[0:4])
-	// Raw unit is 0.1 km; convert to meters with calibration factor.
+	// ECU odometer units are 0.1 km; publish calibrated meters.
 	b.odometer = uint32(float64(raw) * odometerCalibration * 100)
 }
 
@@ -633,7 +633,7 @@ func (b *ECU) updatePower() {
 		return
 	}
 
-	// power in mW = (mV × mA) / 1000
+	// mV × mA / 1000 gives mW.
 	powerMW := int64(b.voltage) * int64(b.current) / 1000
 	delta := float64(powerMW) * dt / 3600.0
 	// Carry the sub-mWh remainder across frames so the per-frame truncation
@@ -873,15 +873,14 @@ func (b *ECU) SetKersVoltage(mV uint16) {
 	b.log.Debug("KERS voltage cached: %d mV (applies on next enable)", mV)
 }
 
-// KersECUEnabled returns the KERS state as reported by the ECU in Status4.
+// KersECUEnabled is the state reported by the ECU, not the service policy.
 func (b *ECU) KersECUEnabled() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.kersECU
 }
 
-// RequestStatus sends the status-request frame (0x4EF) to trigger the ECU to
-// send all status frames.
+// RequestStatus sends 0x4EF, which asks the ECU to emit all status frames.
 func (b *ECU) RequestStatus() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -893,8 +892,7 @@ func (b *ECU) RequestStatus() {
 	}
 }
 
-// UpdateBus replaces the CAN bus reference after a reconnect and resets the
-// stale-frame clock so control frames go out on the fresh socket.
+// UpdateBus swaps in a reconnected socket and resets staleness for that socket.
 func (b *ECU) UpdateBus(bus *can.Bus) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -902,22 +900,19 @@ func (b *ECU) UpdateBus(bus *can.Bus) {
 	b.lastFrameTime = time.Now()
 }
 
-// IsStale returns true if no CAN frame has been received within staleTimeout.
 func (b *ECU) IsStale() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return time.Since(b.lastFrameTime) > staleTimeout
 }
 
-// TimeSinceLastFrame returns how long ago the last CAN frame was received.
 func (b *ECU) TimeSinceLastFrame() time.Duration {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return time.Since(b.lastFrameTime)
 }
 
-// Getters — all thread-safe.
-
+// The accessors below take the read lock so callers cannot race CAN updates.
 func (b *ECU) Voltage() int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -981,7 +976,7 @@ func (b *ECU) Odometer() uint32 {
 	return b.odometer
 }
 
-// KersPolicyEnabled returns the KERS allow state last commanded by the service.
+// KersPolicyEnabled is the allow state last commanded by this service.
 func (b *ECU) KersPolicyEnabled() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
