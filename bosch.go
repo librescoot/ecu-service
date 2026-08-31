@@ -135,6 +135,7 @@ type ECU struct {
 	temperature          int8
 	faultCode            uint32
 	odometer             uint32 // meters, calibrated
+	odometerValid        bool
 	kersECU              bool   // KERS state as reported by ECU (Status4)
 	kersActive           bool   // KERS state as commanded by service
 	boostEnabled         bool   // commanded boost (drives the control frame)
@@ -413,6 +414,7 @@ func (b *ECU) handleStatus3(frame can.Frame) {
 	raw := binary.BigEndian.Uint32(frame.Data[0:4])
 	// ECU odometer units are 0.1 km; publish calibrated meters.
 	b.odometer = uint32(float64(raw) * odometerCalibration * 100)
+	b.odometerValid = true
 }
 
 func (b *ECU) handleStatus4(frame can.Frame) {
@@ -974,6 +976,12 @@ func (b *ECU) Odometer() uint32 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.odometer
+}
+
+func (b *ECU) OdometerValid() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.odometerValid
 }
 
 // KersPolicyEnabled is the allow state last commanded by this service.

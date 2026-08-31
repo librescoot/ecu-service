@@ -37,6 +37,7 @@ type Status struct {
 	FaultCode            uint32
 	FaultDesc            string
 	Odometer             uint32
+	OdometerValid        bool
 	KersActive           bool
 	BoostEnabled         bool
 	KersReasonOff        string
@@ -147,7 +148,9 @@ func (tx *IPCTx) SendStatus(s Status) error {
 	add("temperature", s.Temperature, s.Temperature != l.Temperature)
 	add("fault:code", s.FaultCode, s.FaultCode != l.FaultCode)
 	add("fault:description", s.FaultDesc, s.FaultDesc != l.FaultDesc)
-	add("odometer", s.Odometer, s.Odometer != l.Odometer)
+	if s.OdometerValid && (first || !l.OdometerValid || s.Odometer != l.Odometer) {
+		fields["odometer"] = s.Odometer
+	}
 	add("kers", onOff(s.KersActive), s.KersActive != l.KersActive)
 	add("boost", onOff(s.BoostEnabled), s.BoostEnabled != l.BoostEnabled)
 	add("kers-reason-off", s.KersReasonOff, s.KersReasonOff != l.KersReasonOff)
@@ -183,15 +186,21 @@ func (tx *IPCTx) SendStatus(s Status) error {
 		fields["gear:low-torque-ratio"] = s.LowGearTorque
 	}
 
-	tx.last = s
-	tx.hasLast = true
-
-	if len(fields) == 0 {
-		return nil
+	if !s.OdometerValid && l.OdometerValid {
+		s.Odometer = l.Odometer
+		s.OdometerValid = true
+	}
+	if len(fields) != 0 {
+		if _, err := tx.raw.HSet(tx.ctx, ecuHashKey, fields).Result(); err != nil {
+			return err
+		}
 	}
 
-	_, err := tx.raw.HSet(tx.ctx, ecuHashKey, fields).Result()
-	return err
+	// Only suppress unchanged fields after Redis has confirmed the update.
+	// Otherwise an identical later Status3 must be able to retry the write.
+	tx.last = s
+	tx.hasLast = true
+	return nil
 }
 
 // SendECUConfig publishes the ECU's reported configuration values. Each group
@@ -251,9 +260,32 @@ func (tx *IPCTx) PublishThrottle() error {
 	return err
 }
 
+func (tx *IPCTx) SetOdometer(odometer uint32) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if _, err := tx.raw.HSet(tx.ctx, ecuHashKey, "odometer", odometer).Result(); err != nil {
+		return err
+	}
+	tx.last.Odometer = odometer
+	tx.last.OdometerValid = true
+	return nil
+}
+
+func (tx *IPCTx) ClearOdometer() (bool, error) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	deleted, err := tx.raw.HDel(tx.ctx, ecuHashKey, "odometer").Result()
+	if err != nil {
+		return false, err
+	}
+	tx.last.Odometer = 0
+	tx.last.OdometerValid = false
+	return deleted != 0, nil
+}
+
 // PublishOdometer notifies subscribers that the odometer changed.
 func (tx *IPCTx) PublishOdometer() error {
-	_, err := tx.client.Publish(ecuChannel, "odometer")
+	_, err := tx.client.Publish(ecuChannel, "odometer", ipc.Sync())
 	return err
 }
 

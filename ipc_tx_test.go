@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -71,6 +73,102 @@ func TestPublishNotificationsUseHashChannelAndFieldMessage(t *testing.T) {
 				t.Errorf("payload = %q, want %q", msg.Payload, c.want)
 			}
 		})
+	}
+}
+
+func TestSendStatusDoesNotPublishInvalidOdometer(t *testing.T) {
+	tx, mr := newTestTx(t)
+
+	if err := tx.SendStatus(Status{}); err != nil {
+		t.Fatalf("send unrelated status: %v", err)
+	}
+	keys, err := mr.HKeys(ecuHashKey)
+	if err != nil {
+		t.Fatalf("read status hash: %v", err)
+	}
+	for _, key := range keys {
+		if key == "odometer" {
+			t.Fatal("first status published a fake zero odometer")
+		}
+	}
+
+	if err := tx.SendStatus(Status{Odometer: 0, OdometerValid: true}); err != nil {
+		t.Fatalf("send valid zero: %v", err)
+	}
+	got := mr.HGet(ecuHashKey, "odometer")
+	if got != "0" {
+		t.Errorf("odometer = %q, want 0", got)
+	}
+}
+
+func TestMissingCacheClearsStaleRedisOdometer(t *testing.T) {
+	tx, mr := newTestTx(t)
+	mr.HSet(ecuHashKey, "odometer", "123")
+	a := &App{
+		opts:  Options{OdometerFile: filepath.Join(t.TempDir(), "missing.json")},
+		log:   newLogger(LogLevelNone),
+		ipcTx: tx,
+	}
+
+	if err := a.loadCachedOdometer(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := mr.HGet(ecuHashKey, "odometer"); got != "" {
+		t.Fatalf("missing durable cache left stale Redis odometer %q", got)
+	}
+	if a.odometerValid {
+		t.Fatal("missing durable cache established odometer validity")
+	}
+}
+
+func TestCorruptCacheClearsStaleRedisOdometer(t *testing.T) {
+	tx, mr := newTestTx(t)
+	mr.HSet(ecuHashKey, "odometer", "123")
+	path := filepath.Join(t.TempDir(), "odometer.json")
+	if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{
+		opts:  Options{OdometerFile: path},
+		log:   newLogger(LogLevelNone),
+		ipcTx: tx,
+	}
+
+	if err := a.loadCachedOdometer(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := mr.HGet(ecuHashKey, "odometer"); got != "" {
+		t.Fatalf("corrupt durable cache left stale Redis odometer %q", got)
+	}
+}
+
+func TestLoadCachedOdometerPublishesZero(t *testing.T) {
+	tx, mr := newTestTx(t)
+	path := filepath.Join(t.TempDir(), "odometer.json")
+	if err := saveOdometer(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{
+		opts:  Options{OdometerFile: path},
+		log:   newLogger(LogLevelNone),
+		ipcTx: tx,
+	}
+
+	if err := a.loadCachedOdometer(); err != nil {
+		t.Fatal(err)
+	}
+
+	if !a.odometerValid || a.odometer != 0 {
+		t.Fatalf("cached odometer = (%d, %v), want (0, true)", a.odometer, a.odometerValid)
+	}
+	got := mr.HGet(ecuHashKey, "odometer")
+	if got != "0" {
+		t.Errorf("cached odometer = %q, want 0", got)
+	}
+	if a.lastLiveOdometerOK {
+		t.Error("cache publication was treated as a live Status3")
 	}
 }
 
@@ -171,6 +269,31 @@ func TestReportFaultClearWithoutRaiseEmitsNoEvent(t *testing.T) {
 	}
 	if codes := streamCodes(t, mr); len(codes) != 0 {
 		t.Errorf("stream codes = %v, want none", codes)
+	}
+}
+
+func TestSendStatusFailureDoesNotSuppressRetry(t *testing.T) {
+	tx, mr := newTestTx(t)
+	initial := Status{Odometer: 100, OdometerValid: true}
+	if err := tx.SendStatus(initial); err != nil {
+		t.Fatal(err)
+	}
+
+	mr.Close()
+	changed := Status{Odometer: 200, OdometerValid: true}
+	if err := tx.SendStatus(changed); err == nil {
+		t.Fatal("SendStatus succeeded after Redis stopped")
+	}
+	if tx.last.Odometer != initial.Odometer {
+		t.Fatalf("failed write advanced last odometer to %d", tx.last.Odometer)
+	}
+}
+
+func TestPublishOdometerReportsRedisFailure(t *testing.T) {
+	tx, mr := newTestTx(t)
+	mr.Close()
+	if err := tx.PublishOdometer(); err == nil {
+		t.Fatal("synchronous odometer notification hid Redis failure")
 	}
 }
 

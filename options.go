@@ -15,5 +15,6 @@ type Options struct {
 	RedisServer     string
 	RedisPort       int
 	CANDevice       string
+	OdometerFile    string
 	GearRatioValues []uint8
 }

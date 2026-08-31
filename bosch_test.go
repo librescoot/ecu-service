@@ -244,6 +244,29 @@ func TestStatus3_Odometer(t *testing.T) {
 	if ecu.Odometer() != expected {
 		t.Errorf("odometer: expected %d, got %d", expected, ecu.Odometer())
 	}
+	if !ecu.OdometerValid() {
+		t.Error("valid Status3 did not establish odometer validity")
+	}
+}
+
+func TestStatus3_ZeroIsValid(t *testing.T) {
+	ecu := newTestECU()
+	ecu.HandleFrame(makeFrame(frameStatus3, make([]byte, 4)))
+	if ecu.Odometer() != 0 || !ecu.OdometerValid() {
+		t.Fatalf("zero Status3 = (%d, %v), want (0, true)", ecu.Odometer(), ecu.OdometerValid())
+	}
+}
+
+func TestOdometerInvalidUntilCompleteStatus3(t *testing.T) {
+	ecu := newTestECU()
+	ecu.HandleFrame(makeFrame(frameStatus1, make([]byte, 8)))
+	if ecu.OdometerValid() {
+		t.Error("unrelated frame established odometer validity")
+	}
+	ecu.HandleFrame(makeFrame(frameStatus3, make([]byte, 3)))
+	if ecu.OdometerValid() {
+		t.Error("short Status3 established odometer validity")
+	}
 }
 
 // --- Status4 (0x7E3) ---

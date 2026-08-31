@@ -37,12 +37,17 @@ type App struct {
 	bus   *can.Bus
 
 	// Change tracking for publish-on-change fields.
-	lastThrottle       bool
-	lastOdometer       uint32
-	lastKersReason     KERSReason
-	lastRegenAvailable bool
-	lastRegenReason    string
-	lastECUConfig      ECUConfigStatus
+	lastThrottle           bool
+	lastLiveOdometer       uint32
+	lastLiveOdometerOK     bool
+	odometer               uint32
+	odometerValid          bool
+	persistedOdometer      uint32
+	persistedOdometerValid bool
+	lastKersReason         KERSReason
+	lastRegenAvailable     bool
+	lastRegenReason        string
+	lastECUConfig          ECUConfigStatus
 	// lastUnknownFault dedupes the unknown-code warning. The ECU repeats its
 	// fault code on every status frame, so logging unconditionally would bury
 	// the journal at the frame rate.
@@ -56,6 +61,9 @@ type App struct {
 
 func NewApp(ctx context.Context, opts Options) (*App, error) {
 	log := newLogger(opts.LogLevel)
+	if opts.OdometerFile == "" {
+		opts.OdometerFile = defaultOdometerFile
+	}
 
 	a := &App{opts: opts, log: log}
 
@@ -74,16 +82,23 @@ func NewApp(ctx context.Context, opts Options) (*App, error) {
 	a.ipc = client
 	log.Info("Connected to Redis at %s:%d", opts.RedisServer, opts.RedisPort)
 
-	// Open CAN bus.
+	a.ipcTx = newIPCTx(ctx, client, log)
+	if err := a.loadCachedOdometer(); err != nil {
+		client.Close()
+		return nil, err
+	}
+
+	// Open CAN only after Redis has accepted the restored (or cleared)
+	// odometer state, so constructor failures do not leak the bus resource.
 	bus, err := can.NewBusForInterfaceWithName(opts.CANDevice)
 	if err != nil {
+		client.Close()
 		return nil, fmt.Errorf("CAN bus open: %w", err)
 	}
 	a.bus = bus
 
 	a.ecu = newECU(bus, log, opts.GearRatioValues)
 	a.battery = &BatteryTracker{}
-	a.ipcTx = newIPCTx(ctx, client, log)
 
 	// Publish a zero-valued config so any stale config:* fields left behind
 	// by a previous service instance get HDEL'd. Real values reappear as
@@ -121,6 +136,36 @@ func NewApp(ctx context.Context, opts Options) (*App, error) {
 	a.commLost = newCommLostWatcher(client, a.ecu, log, a.onCommLostChange)
 
 	return a, nil
+}
+
+func (a *App) loadCachedOdometer() error {
+	odometer, valid, err := loadOdometer(a.opts.OdometerFile)
+	if err != nil {
+		a.log.Warn("Failed to load odometer cache: %v", err)
+	}
+	if !valid {
+		deleted, clearErr := a.ipcTx.ClearOdometer()
+		if clearErr != nil {
+			return fmt.Errorf("clear stale odometer: %w", clearErr)
+		}
+		if deleted {
+			if err := a.ipcTx.PublishOdometer(); err != nil {
+				return fmt.Errorf("publish cleared odometer: %w", err)
+			}
+		}
+		return nil
+	}
+	a.odometer = odometer
+	a.odometerValid = true
+	a.persistedOdometer = odometer
+	a.persistedOdometerValid = true
+	if err := a.ipcTx.SetOdometer(odometer); err != nil {
+		return fmt.Errorf("publish cached odometer: %w", err)
+	}
+	if err := a.ipcTx.PublishOdometer(); err != nil {
+		return fmt.Errorf("notify cached odometer: %w", err)
+	}
+	return nil
 }
 
 // onCommLostChange publishes or clears the synthetic E20 fault. On clear it
@@ -296,7 +341,7 @@ func (h *appHandler) Handle(frame can.Frame) {
 	a.frameCounts[frame.ID]++
 	a.frameMu.Unlock()
 
-	a.onFrame()
+	a.onFrame(frame.ID == frameStatus3 && frame.Length >= 4)
 }
 
 func (a *App) regenState(s Status) RegenState {
@@ -308,9 +353,32 @@ func (a *App) regenState(s Status) RegenState {
 	return applyObservedRegen(regen, s.Current)
 }
 
-func (a *App) onFrame() {
+func (a *App) acceptStatus3Odometer() bool {
+	odometer := a.ecu.Odometer()
+	if !a.ecu.OdometerValid() {
+		return false
+	}
+	a.odometer = odometer
+	a.odometerValid = true
+	if !a.persistedOdometerValid || odometer != a.persistedOdometer {
+		if err := saveOdometer(a.opts.OdometerFile, odometer); err != nil {
+			a.log.Error("Failed to persist odometer: %v", err)
+		} else {
+			a.persistedOdometer = odometer
+			a.persistedOdometerValid = true
+		}
+	}
+	return !a.lastLiveOdometerOK || odometer != a.lastLiveOdometer
+}
+
+func (a *App) onFrame(genuineStatus3 bool) {
 	ratios := a.ecu.GearRatios()
 	sw := a.ecu.SoftwareVersion()
+
+	notifyOdometer := false
+	if genuineStatus3 {
+		notifyOdometer = a.acceptStatus3Odometer()
+	}
 
 	s := Status{
 		Voltage:              a.ecu.Voltage(),
@@ -325,7 +393,8 @@ func (a *App) onFrame() {
 		EnergyRecovered:      a.ecu.EnergyRecovered(),
 		Temperature:          a.ecu.Temperature(),
 		FaultCode:            a.ecu.FaultCode(),
-		Odometer:             a.ecu.Odometer(),
+		Odometer:             a.odometer,
+		OdometerValid:        a.odometerValid,
 		KersActive:           a.ecu.KersECUEnabled(), // publish ECU-reported KERS state (matches v1)
 		BoostEnabled:         a.ecu.BoostEnabled(),
 		KersReasonOff:        string(a.lastKersReason),
@@ -368,7 +437,9 @@ func (a *App) onFrame() {
 	s.RegenReason = regen.Reason
 	s.RegenExpected = regen.ExpectedMA
 
+	statusPublished := true
 	if err := a.ipcTx.SendStatus(s); err != nil {
+		statusPublished = false
 		a.log.Error("SendStatus: %v", err)
 	}
 
@@ -395,10 +466,12 @@ func (a *App) onFrame() {
 			a.log.Error("PublishThrottle: %v", err)
 		}
 	}
-	if s.Odometer != a.lastOdometer {
-		a.lastOdometer = s.Odometer
+	if notifyOdometer && statusPublished {
 		if err := a.ipcTx.PublishOdometer(); err != nil {
 			a.log.Error("PublishOdometer: %v", err)
+		} else {
+			a.lastLiveOdometer = s.Odometer
+			a.lastLiveOdometerOK = true
 		}
 	}
 	if s.RegenAvailable != a.lastRegenAvailable || s.RegenReason != a.lastRegenReason {

@@ -15,12 +15,13 @@ var version = "dev"
 
 func main() {
 	var (
-		logLevel    = flag.Int("log", int(LogLevelInfo), "Log level (0=NONE 1=ERROR 2=WARN 3=INFO 4=DEBUG)")
-		redisServer = flag.String("redis_server", "127.0.0.1", "Redis server address")
-		redisPort   = flag.Int("redis_port", 6379, "Redis server port")
-		canDevice   = flag.String("can_device", "can0", "CAN device name")
-		gearRatios  = flag.String("gear_ratios", "", "Bosch ECU gear ratios (comma-separated values 1-3, each 1-255, e.g. '100,150,200')")
-		printVer    = flag.Bool("version", false, "Print version and exit")
+		logLevel     = flag.Int("log", int(LogLevelInfo), "Log level (0=NONE 1=ERROR 2=WARN 3=INFO 4=DEBUG)")
+		redisServer  = flag.String("redis_server", "127.0.0.1", "Redis server address")
+		redisPort    = flag.Int("redis_port", 6379, "Redis server port")
+		canDevice    = flag.String("can_device", "can0", "CAN device name")
+		odometerFile = flag.String("odometer-file", defaultOdometerFile, "Durable odometer cache file")
+		gearRatios   = flag.String("gear_ratios", "", "Bosch ECU gear ratios (comma-separated values 1-3, each 1-255, e.g. '100,150,200')")
+		printVer     = flag.Bool("version", false, "Print version and exit")
 	)
 	flag.Parse()
 
@@ -62,6 +63,7 @@ func main() {
 		RedisServer:     *redisServer,
 		RedisPort:       *redisPort,
 		CANDevice:       *canDevice,
+		OdometerFile:    *odometerFile,
 		GearRatioValues: gearRatioValues,
 	}
 
