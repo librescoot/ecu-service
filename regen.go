@@ -46,6 +46,8 @@ func computeRegen(policyAllows bool, armReason KERSReason, wheelRPM, vPackMV, vM
 		return RegenState{Available: false, Reason: "cold"}
 	case KERSReasonHot:
 		return RegenState{Available: false, Reason: "hot"}
+	case KERSReasonUnknown:
+		return RegenState{Available: false, Reason: "off"}
 	}
 	// Policy does not allow KERS (user-disabled or not yet ready to drive).
 	if !policyAllows {

@@ -288,30 +288,50 @@ const ecuSilenceLogAfter = 2 * time.Second
 // is covered by the re-assert on the watchdog tick, not by this number.
 const ecuAssertHoldAfterPowerOn = 1500 * time.Millisecond
 
-func (b *ECU) HandleFrame(frame can.Frame) {
+func (b *ECU) HandleFrame(frame can.Frame) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// Frame presence is the single most useful thing this log carries when
-	// diagnosing a quiet ECU, so make the gaps explicit rather than leaving them
-	// to be inferred from the spacing of other lines.
-	if gap := time.Since(b.lastFrameTime); gap > ecuSilenceLogAfter {
+	minimum, recognized := frameMinimumLength(frame.ID)
+	if !recognized {
+		return false
+	}
+	if frame.Length < minimum {
+		// Keep the per-frame warning text while refusing to count malformed known
+		// traffic as controller liveness or command acknowledgement.
+		b.dispatchFrameLocked(frame)
+		return false
+	}
+
+	now := time.Now()
+	if gap := now.Sub(b.lastFrameTime); gap > ecuSilenceLogAfter {
 		b.log.Info("ECU frames resumed after %.1fs of silence", gap.Seconds())
 	}
-	b.lastFrameTime = time.Now()
+	b.lastFrameTime = now
 	b.sawFrame = true
-	// A frame is evidence the controller is alive, which is not the same fact as
-	// what vehicle-service commanded, so it deliberately does not write the power
-	// command. It only closes the gap the re-send exists for: anything commanded
-	// while the ECU was unreachable was dropped, and this is the earliest moment
-	// we know it would be heard.
-	//
-	// It must not be able to re-open a commanded-off gate. Doing that let frames
-	// still in flight while the rail was being cut flip the state back and forth
-	// at the watchdog tick, transmitting into a controller that was losing supply
-	// on every flip.
 	b.applyCommandedStateLocked(true)
+	b.dispatchFrameLocked(frame)
+	return true
+}
 
+func frameMinimumLength(id uint32) (uint8, bool) {
+	switch id {
+	case frameStatus1, frameStatus5:
+		return 8, true
+	case frameStatus2:
+		return 6, true
+	case frameStatus3, frameEBSStatus:
+		return 4, true
+	case frameMaxVoltage, frameMinVoltage, frameMaxPhaseCurrent, frameStartupPhaseCurrent:
+		return 2, true
+	case frameStatus4, frameGear, frameSpeedLimit, frameWheelCircumference:
+		return 1, true
+	default:
+		return 0, false
+	}
+}
+
+func (b *ECU) dispatchFrameLocked(frame can.Frame) {
 	switch frame.ID {
 	case frameStatus1:
 		b.handleStatus1(frame)
@@ -476,6 +496,7 @@ func (b *ECU) handleGear(frame can.Frame) {
 
 func (b *ECU) handleEBSStatus(frame can.Frame) {
 	if frame.Length < 4 {
+		b.log.Warn("EBSStatus frame too short: %d bytes", frame.Length)
 		return
 	}
 	v := binary.BigEndian.Uint16(frame.Data[0:2])
@@ -894,12 +915,11 @@ func (b *ECU) RequestStatus() {
 	}
 }
 
-// UpdateBus swaps in a reconnected socket and resets staleness for that socket.
+// UpdateBus swaps in a reconnected socket without fabricating frame freshness.
 func (b *ECU) UpdateBus(bus *can.Bus) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.bus = bus
-	b.lastFrameTime = time.Now()
 }
 
 func (b *ECU) IsStale() bool {
@@ -1086,10 +1106,11 @@ func (b *ECU) SetGear(gear uint8) error {
 
 	return b.publish(gearFrame, "gear")
 }
-func (b *ECU) Power() int {
+func (b *ECU) Power() int64 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.voltage * b.current / 1000 // mW
+	// Convert before multiplying so this remains safe on 32-bit ARM.
+	return int64(b.voltage) * int64(b.current) / 1000 // mW
 }
 func (b *ECU) EnergyConsumed() uint64 {
 	b.mu.RLock()

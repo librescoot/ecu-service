@@ -13,43 +13,56 @@ const kersEngineOnDelay = 1500 * time.Millisecond
 type KERSReason string
 
 const (
-	KERSReasonNone KERSReason = "none"
-	KERSReasonCold KERSReason = "cold"
-	KERSReasonHot  KERSReason = "hot"
+	KERSReasonNone    KERSReason = "none"
+	KERSReasonCold    KERSReason = "cold"
+	KERSReasonHot     KERSReason = "hot"
+	KERSReasonUnknown KERSReason = "unknown"
 )
 
-// KERSController decides when regen (KERS) may be enabled. It mirrors the
-// production v1 gating: changes are only applied while the vehicle is stopped
-// and the engine is ready, the engine-on write is deferred ~1.5s for the ECU to
-// initialize, a user setting can force KERS off, and an ECU that re-enables KERS
-// despite a non-none reason is reconciled back off. As an explicit safety
-// belt (a v2 addition over v1), KERS is also disabled immediately when the
-// vehicle leaves ready-to-drive.
+// KERSController decides when regen (KERS) may be enabled. Changes are applied
+// only while stopped and ready. Callbacks are always invoked without mu held.
 type KERSController struct {
 	mu               sync.Mutex
+	actionsMu        sync.Mutex
+	generation       uint64
 	temperatureState TempState
 	reason           KERSReason
 	vehicleStopped   bool
+	readyToDrive     bool
 	engineReady      bool
 	settingsDisabled bool
 	enabled          bool
+	engineOnDelay    time.Duration
+	engineReadyAt    time.Time
 	engineOnTimer    *time.Timer
 
-	onEnable func(bool)       // send the ECU command + publish kers
-	onReason func(KERSReason) // store + publish kers-reason-off
+	onEnable func(bool)
+	onReason func(KERSReason)
+}
+
+type kersActions struct {
+	generation uint64
+	callReason bool
+	reason     KERSReason
+	callEnable bool
+	enabled    bool
 }
 
 func newKERSController(ctx context.Context, onEnable func(bool), onReason func(KERSReason)) *KERSController {
+	return newKERSControllerWithDelay(ctx, kersEngineOnDelay, onEnable, onReason)
+}
+
+func newKERSControllerWithDelay(ctx context.Context, delay time.Duration, onEnable func(bool), onReason func(KERSReason)) *KERSController {
 	k := &KERSController{
 		temperatureState: TempUnknown,
-		reason:           KERSReasonNone,
+		reason:           KERSReasonUnknown,
 		vehicleStopped:   true,
+		engineOnDelay:    delay,
 		onEnable:         onEnable,
 		onReason:         onReason,
 	}
-	k.engineOnTimer = time.NewTimer(kersEngineOnDelay)
+	k.engineOnTimer = time.NewTimer(delay)
 	k.engineOnTimer.Stop()
-
 	go k.timerLoop(ctx)
 	return k
 }
@@ -61,124 +74,162 @@ func (k *KERSController) timerLoop(ctx context.Context) {
 			return
 		case <-k.engineOnTimer.C:
 			k.mu.Lock()
+			if !k.readyToDrive {
+				k.mu.Unlock()
+				continue
+			}
+			// A timer event from an earlier ready period may already have been
+			// selected when a new period begins. Honor the new edge's complete
+			// delay rather than enabling early from that stale event.
+			if remaining := time.Until(k.engineReadyAt); remaining > 0 {
+				k.engineOnTimer.Reset(remaining)
+				k.mu.Unlock()
+				continue
+			}
 			k.engineReady = true
-			k.updateKers()
+			k.generation++
+			actions := k.updateKersLocked()
 			k.mu.Unlock()
+			k.runActions(actions)
 		}
 	}
 }
 
-// updateKers recomputes the KERS reason from temperature and, while the vehicle
-// is stopped, publishes the reason and (when engine-ready) applies the enable
-// decision. Gating both on "stopped" means a temperature or settings change
-// mid-ride applies at the next stop rather than altering regen feel while
-// moving. Must be called with mu held; releases and re-acquires mu around the
-// callbacks.
-func (k *KERSController) updateKers() {
-	var reason KERSReason
-	switch k.temperatureState {
+func reasonForTemp(temp TempState) KERSReason {
+	switch temp {
 	case TempCold:
-		reason = KERSReasonCold
+		return KERSReasonCold
 	case TempHot:
-		reason = KERSReasonHot
+		return KERSReasonHot
 	case TempIdeal:
-		reason = KERSReasonNone
-	case TempUnknown:
-		return // wait for a known temperature state
+		return KERSReasonNone
+	default:
+		return KERSReasonUnknown
 	}
-	k.reason = reason
-
-	if !k.vehicleStopped {
-		return
-	}
-
-	// Re-assert while stopped and ready so reconciliation can turn KERS off again
-	// if the ECU has drifted from the commanded state.
-	callEnable := k.engineReady
-	var newEnabled bool
-	if callEnable {
-		newEnabled = !k.settingsDisabled && reason == KERSReasonNone
-		k.enabled = newEnabled
-	}
-
-	onEnable := k.onEnable
-	onReason := k.onReason
-	k.mu.Unlock()
-	onReason(reason)
-	if callEnable {
-		onEnable(newEnabled)
-	}
-	k.mu.Lock()
 }
 
-// SetReadyToDrive arms the deferred engine-on timer when entering ready-to-drive
-// and disables KERS immediately when leaving it.
+// updateKersLocked recomputes state and returns work to run after unlocking.
+func (k *KERSController) updateKersLocked() kersActions {
+	reason := reasonForTemp(k.temperatureState)
+	k.reason = reason
+	if !k.vehicleStopped {
+		return kersActions{}
+	}
+
+	actions := kersActions{generation: k.generation, callReason: true, reason: reason}
+	if k.engineReady {
+		actions.callEnable = true
+		actions.enabled = !k.settingsDisabled && reason == KERSReasonNone
+		k.enabled = actions.enabled
+	}
+	return actions
+}
+
+func (k *KERSController) runActions(actions kersActions) {
+	if !actions.callReason && !actions.callEnable {
+		return
+	}
+	// State callbacks may originate from independent Redis, timer, and CAN
+	// goroutines. Serialize their effects, and discard work computed before a
+	// newer state transition, so an old enable can never run after a new inhibit.
+	k.actionsMu.Lock()
+	defer k.actionsMu.Unlock()
+	k.mu.Lock()
+	current := actions.generation == k.generation
+	k.mu.Unlock()
+	if !current {
+		return
+	}
+	if actions.callReason && k.onReason != nil {
+		k.onReason(actions.reason)
+	}
+	if actions.callEnable && k.onEnable != nil {
+		k.onEnable(actions.enabled)
+	}
+}
+
+func (k *KERSController) Reason() KERSReason {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.reason
+}
+
+// SetReadyToDrive arms the deferred engine-on timer only on the false-to-true
+// edge and disables KERS immediately on the true-to-false edge.
 func (k *KERSController) SetReadyToDrive(ready bool) {
 	k.mu.Lock()
-	defer k.mu.Unlock()
-
+	if ready == k.readyToDrive {
+		k.mu.Unlock()
+		return
+	}
+	k.readyToDrive = ready
+	k.generation++
 	if !ready {
-		k.engineOnTimer.Stop()
+		stopTimer(k.engineOnTimer)
+		k.engineReadyAt = time.Time{}
 		k.engineReady = false
-		if k.enabled {
-			k.enabled = false
-			k.mu.Unlock()
-			k.onEnable(false)
-			k.mu.Lock()
-		}
+		callDisable := k.enabled
+		k.enabled = false
+		actions := kersActions{generation: k.generation, callEnable: callDisable, enabled: false}
+		k.mu.Unlock()
+		k.runActions(actions)
 		return
 	}
-
-	if k.engineReady {
-		return
-	}
-	k.engineOnTimer.Stop()
-	k.engineOnTimer.Reset(kersEngineOnDelay)
+	stopTimer(k.engineOnTimer)
+	k.engineReadyAt = time.Now().Add(k.engineOnDelay)
+	k.engineOnTimer.Reset(k.engineOnDelay)
+	k.mu.Unlock()
 }
 
-// SetTempState updates the active-battery temperature state and re-evaluates.
 func (k *KERSController) SetTempState(temp TempState) {
 	k.mu.Lock()
-	defer k.mu.Unlock()
 	if temp == k.temperatureState {
+		k.mu.Unlock()
 		return
 	}
 	k.temperatureState = temp
-	k.updateKers()
+	k.generation++
+	actions := k.updateKersLocked()
+	k.mu.Unlock()
+	k.runActions(actions)
 }
 
-// SetSettingsEnabled toggles the user KERS enable setting and re-evaluates.
 func (k *KERSController) SetSettingsEnabled(enabled bool) {
 	k.mu.Lock()
-	defer k.mu.Unlock()
 	disabled := !enabled
 	if k.settingsDisabled == disabled {
+		k.mu.Unlock()
 		return
 	}
 	k.settingsDisabled = disabled
-	k.updateKers()
+	k.generation++
+	actions := k.updateKersLocked()
+	k.mu.Unlock()
+	k.runActions(actions)
 }
 
-// UpdateVehicleStopped tracks whether the vehicle is stopped (speed == 0); KERS
-// is only (re-)evaluated when coming to a stop.
 func (k *KERSController) UpdateVehicleStopped(stopped bool) {
 	k.mu.Lock()
-	defer k.mu.Unlock()
 	if stopped == k.vehicleStopped {
+		k.mu.Unlock()
 		return
 	}
 	k.vehicleStopped = stopped
+	k.generation++
+	var actions kersActions
 	if stopped {
-		k.updateKers()
+		actions = k.updateKersLocked()
 	}
+	k.mu.Unlock()
+	k.runActions(actions)
 }
 
-// UpdateECUKers reconciles the ECU back off when it reports KERS enabled despite
-// a non-none reason-off (e.g. the ECU re-enabled regen on its own).
 func (k *KERSController) UpdateECUKers(ecuEnabled bool) {
 	k.mu.Lock()
-	defer k.mu.Unlock()
+	var actions kersActions
 	if ecuEnabled && k.reason != KERSReasonNone {
-		k.updateKers()
+		actions = k.updateKersLocked()
 	}
+	k.mu.Unlock()
+	k.runActions(actions)
 }

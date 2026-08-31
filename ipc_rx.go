@@ -89,58 +89,113 @@ func (rx *IPCRx) readBattery(idx int) error {
 
 func (rx *IPCRx) watchSettings() {
 	w := rx.client.NewHashWatcher("settings")
-	w.OnField("engine-ecu.boost", func(val string) error {
-		rx.log.Info("Boost setting: %s", val)
-		rx.ecu.SetBoostEnabled(val == "true")
-		return nil
-	})
-	// KERS enable/disable; defaults to enabled when unset.
-	w.OnField("engine-ecu.kers", func(val string) error {
-		enabled := kersSettingEnabled(val)
-		rx.log.Info("KERS enabled setting: %s (enabled=%v)", val, enabled)
-		rx.kers.SetSettingsEnabled(enabled)
-		return nil
-	})
-	w.OnField("engine-ecu.kers-power", func(val string) error {
-		mA, err := strconv.Atoi(val)
-		if err != nil {
-			rx.log.Error("invalid engine-ecu.kers-power %q: %v", val, err)
-			return nil
-		}
-		rx.log.Info("KERS power setting (single): %d mA", mA)
-		rx.mu.Lock()
-		rx.kersPowerSingle = uint16(mA)
-		rx.mu.Unlock()
-		rx.applyKersPower()
-		return nil
-	})
-	w.OnField("engine-ecu.kers-power-dual", func(val string) error {
-		mA, err := strconv.Atoi(val)
-		if err != nil {
-			rx.log.Error("invalid engine-ecu.kers-power-dual %q: %v", val, err)
-			return nil
-		}
-		rx.log.Info("KERS power setting (dual): %d mA", mA)
-		rx.mu.Lock()
-		rx.kersPowerDual = uint16(mA)
-		rx.hasDualPower = true
-		rx.mu.Unlock()
-		rx.applyKersPower()
-		return nil
-	})
-	w.OnField("engine-ecu.kers-voltage", func(val string) error {
-		mV, err := strconv.Atoi(val)
-		if err != nil {
-			rx.log.Error("invalid engine-ecu.kers-voltage %q: %v", val, err)
-			return nil
-		}
-		rx.log.Info("KERS voltage setting: %d mV", mV)
-		rx.ecu.SetKersVoltage(uint16(mV))
-		return nil
-	})
+	w.OnField("engine-ecu.boost", rx.handleBoostSetting)
+	w.OnField("engine-ecu.kers", rx.handleKersEnabledSetting)
+	w.OnField("engine-ecu.kers-power", rx.handleKersPowerSingle)
+	w.OnField("engine-ecu.kers-power-dual", rx.handleKersPowerDual)
+	w.OnField("engine-ecu.kers-voltage", rx.handleKersVoltage)
+	// HashPublisher.ReplaceAll/Clear publish event-only messages rather than
+	// one event per field. Re-read the complete hash so absent values receive
+	// the same defaults as individual HDEL notifications.
+	w.OnEvent("replaced", rx.readSettings)
+	w.OnEvent("cleared", rx.readSettings)
 	if err := w.StartWithSync(); err != nil {
 		rx.log.Error("settings watcher: %v", err)
 	}
+}
+
+func (rx *IPCRx) readSettings() error {
+	fields, err := rx.client.HGetAll("settings")
+	if err != nil {
+		return fmt.Errorf("read settings: %w", err)
+	}
+	if err := rx.handleBoostSetting(fields["engine-ecu.boost"]); err != nil {
+		return err
+	}
+	if err := rx.handleKersEnabledSetting(fields["engine-ecu.kers"]); err != nil {
+		return err
+	}
+	if err := rx.handleKersPowerSingle(fields["engine-ecu.kers-power"]); err != nil {
+		return err
+	}
+	if err := rx.handleKersPowerDual(fields["engine-ecu.kers-power-dual"]); err != nil {
+		return err
+	}
+	return rx.handleKersVoltage(fields["engine-ecu.kers-voltage"])
+}
+
+func (rx *IPCRx) handleBoostSetting(val string) error {
+	rx.log.Info("Boost setting: %s", val)
+	rx.ecu.SetBoostEnabled(val == "true")
+	return nil
+}
+
+func (rx *IPCRx) handleKersEnabledSetting(val string) error {
+	enabled := kersSettingEnabled(val)
+	rx.log.Info("KERS enabled setting: %s (enabled=%v)", val, enabled)
+	rx.kers.SetSettingsEnabled(enabled)
+	return nil
+}
+
+func parseKersUint16(field, val string) (uint16, error) {
+	parsed, err := strconv.ParseUint(val, 10, 16)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", field, val, err)
+	}
+	return uint16(parsed), nil
+}
+
+func (rx *IPCRx) handleKersPowerSingle(val string) error {
+	mA := DefaultKersCurrent
+	if val != "" {
+		parsed, err := parseKersUint16("engine-ecu.kers-power", val)
+		if err != nil {
+			rx.log.Error("%v", err)
+			return nil
+		}
+		mA = parsed
+	}
+	rx.mu.Lock()
+	rx.kersPowerSingle = mA
+	rx.mu.Unlock()
+	rx.applyKersPower()
+	return nil
+}
+
+func (rx *IPCRx) handleKersPowerDual(val string) error {
+	if val == "" {
+		rx.mu.Lock()
+		rx.kersPowerDual = DefaultKersCurrent
+		rx.hasDualPower = false
+		rx.mu.Unlock()
+		rx.applyKersPower()
+		return nil
+	}
+	mA, err := parseKersUint16("engine-ecu.kers-power-dual", val)
+	if err != nil {
+		rx.log.Error("%v", err)
+		return nil
+	}
+	rx.mu.Lock()
+	rx.kersPowerDual = mA
+	rx.hasDualPower = true
+	rx.mu.Unlock()
+	rx.applyKersPower()
+	return nil
+}
+
+func (rx *IPCRx) handleKersVoltage(val string) error {
+	mV := DefaultKersVoltage
+	if val != "" {
+		parsed, err := parseKersUint16("engine-ecu.kers-voltage", val)
+		if err != nil {
+			rx.log.Error("%v", err)
+			return nil
+		}
+		mV = parsed
+	}
+	rx.ecu.SetKersVoltage(mV)
+	return nil
 }
 
 // kersSettingEnabled reads settings[engine-ecu.kers]. The schema declares the

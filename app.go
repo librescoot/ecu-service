@@ -44,7 +44,6 @@ type App struct {
 	odometerValid          bool
 	persistedOdometer      uint32
 	persistedOdometerValid bool
-	lastKersReason         KERSReason
 	lastRegenAvailable     bool
 	lastRegenReason        string
 	lastECUConfig          ECUConfigStatus
@@ -107,9 +106,7 @@ func NewApp(ctx context.Context, opts Options) (*App, error) {
 		log.Error("Failed to send default ECU config: %v", err)
 	}
 
-	a.lastKersReason = KERSReasonNone
-
-	// KERS callbacks — called from within KERSController when state changes.
+	// KERS callbacks are invoked outside the controller mutex.
 	a.kers = newKERSController(ctx,
 		func(enabled bool) {
 			a.ecu.SetKersEnabled(enabled)
@@ -118,12 +115,14 @@ func NewApp(ctx context.Context, opts Options) (*App, error) {
 			}
 		},
 		func(reason KERSReason) {
-			a.lastKersReason = reason
-			if err := a.ipcTx.PublishKERSReasonOff(); err != nil {
-				log.Error("PublishKERSReasonOff: %v", err)
+			if err := a.ipcTx.SetKERSReasonOff(reason); err != nil {
+				log.Error("SetKERSReasonOff: %v", err)
 			}
 		},
 	)
+	if err := a.ipcTx.SetKERSReasonOff(a.kers.Reason()); err != nil {
+		log.Error("Set initial KERS reason: %v", err)
+	}
 
 	// Diagnostics callback — called when fault is committed or cleared.
 	a.diag = newDiagnostics(ctx, log, func(fault Fault, cfg FaultConfig) {
@@ -333,7 +332,9 @@ func (a *App) logFrameSummary() {
 func (h *appHandler) Handle(frame can.Frame) {
 	a := (*App)(h)
 	a.log.DebugCAN("RX", frame.ID, frame.Data, frame.Length)
-	a.ecu.HandleFrame(frame)
+
+	// The traffic summary intentionally counts raw bus traffic, including IDs
+	// this service does not consume.
 	a.frameMu.Lock()
 	if a.frameCounts == nil {
 		a.frameCounts = make(map[uint32]int)
@@ -341,7 +342,10 @@ func (h *appHandler) Handle(frame can.Frame) {
 	a.frameCounts[frame.ID]++
 	a.frameMu.Unlock()
 
-	a.onFrame(frame.ID == frameStatus3 && frame.Length >= 4)
+	if !a.ecu.HandleFrame(frame) {
+		return
+	}
+	a.onFrame(frame.ID == frameStatus3)
 }
 
 func (a *App) regenState(s Status) RegenState {
@@ -349,7 +353,7 @@ func (a *App) regenState(s Status) RegenState {
 	// ECU's known speed and voltage gates. Status4 is an event-driven snapshot,
 	// so retaining it in s.KersActive is useful for diagnostics and
 	// reconciliation but it must not gate the live prediction.
-	regen := computeRegen(a.ecu.KersPolicyEnabled(), a.lastKersReason, int(s.RPM), s.Voltage, s.AcceptedRegenVoltage, s.AcceptedRegenCurrent)
+	regen := computeRegen(a.ecu.KersPolicyEnabled(), KERSReason(s.KersReasonOff), int(s.RPM), s.Voltage, s.AcceptedRegenVoltage, s.AcceptedRegenCurrent)
 	return applyObservedRegen(regen, s.Current)
 }
 
@@ -374,6 +378,7 @@ func (a *App) acceptStatus3Odometer() bool {
 func (a *App) onFrame(genuineStatus3 bool) {
 	ratios := a.ecu.GearRatios()
 	sw := a.ecu.SoftwareVersion()
+	kersReason := a.kers.Reason()
 
 	notifyOdometer := false
 	if genuineStatus3 {
@@ -397,7 +402,7 @@ func (a *App) onFrame(genuineStatus3 bool) {
 		OdometerValid:        a.odometerValid,
 		KersActive:           a.ecu.KersECUEnabled(), // publish ECU-reported KERS state (matches v1)
 		BoostEnabled:         a.ecu.BoostEnabled(),
-		KersReasonOff:        string(a.lastKersReason),
+		KersReasonOff:        string(kersReason),
 		AcceptedRegenVoltage: a.ecu.AcceptedRegenVoltage(),
 		AcceptedRegenCurrent: a.ecu.AcceptedRegenCurrent(),
 		Gear:                 a.ecu.Gear(),

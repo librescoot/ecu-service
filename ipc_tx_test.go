@@ -76,6 +76,67 @@ func TestPublishNotificationsUseHashChannelAndFieldMessage(t *testing.T) {
 	}
 }
 
+func TestSetKERSReasonOffStoresBeforeNotification(t *testing.T) {
+	tx, mr := newTestTx(t)
+	sub := redis.NewClient(&redis.Options{Addr: mr.Addr()}).Subscribe(context.Background(), ecuChannel)
+	t.Cleanup(func() { sub.Close() })
+	if _, err := sub.Receive(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := tx.SetKERSReasonOff(KERSReasonHot); err != nil {
+		t.Fatal(err)
+	}
+	msg := receive(t, sub)
+	if msg.Payload != "kers-reason-off" {
+		t.Fatalf("notification = %q", msg.Payload)
+	}
+	if got := mr.HGet(ecuHashKey, "kers-reason-off"); got != "hot" {
+		t.Fatalf("subscriber observed hash value %q, want hot", got)
+	}
+	if got := tx.last.KersReasonOff; got != "hot" {
+		t.Fatalf("cache = %q, want hot", got)
+	}
+}
+
+func TestSendStatusCannotRollbackKERSReason(t *testing.T) {
+	tx, mr := newTestTx(t)
+	if err := tx.SetKERSReasonOff(KERSReasonHot); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.SendStatus(Status{KersReasonOff: string(KERSReasonCold)}); err != nil {
+		t.Fatal(err)
+	}
+	if got := mr.HGet(ecuHashKey, "kers-reason-off"); got != "hot" {
+		t.Fatalf("generic status rolled reason back to %q", got)
+	}
+	if got := tx.last.KersReasonOff; got != "hot" {
+		t.Fatalf("generic status cache rolled reason back to %q", got)
+	}
+}
+
+func TestSetKERSReasonOffPreservesPublicEnumForUnknown(t *testing.T) {
+	tx, mr := newTestTx(t)
+	if err := tx.SetKERSReasonOff(KERSReasonUnknown); err != nil {
+		t.Fatal(err)
+	}
+	if got := mr.HGet(ecuHashKey, "kers-reason-off"); got != "none" {
+		t.Fatalf("wire reason = %q, want schema-compatible none", got)
+	}
+}
+
+func TestSetKERSReasonOffFailureDoesNotAdvanceCache(t *testing.T) {
+	tx, mr := newTestTx(t)
+	tx.last.KersReasonOff = "cold"
+	mr.Close()
+	if err := tx.SetKERSReasonOff(KERSReasonHot); err == nil {
+		t.Fatal("SetKERSReasonOff succeeded after Redis stopped")
+	}
+	if got := tx.last.KersReasonOff; got != "cold" {
+		t.Fatalf("failed write advanced cache to %q", got)
+	}
+}
+
 func TestSendStatusDoesNotPublishInvalidOdometer(t *testing.T) {
 	tx, mr := newTestTx(t)
 

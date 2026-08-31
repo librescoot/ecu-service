@@ -22,6 +22,7 @@ func TestComputeRegen(t *testing.T) {
 	}{
 		{"cold disarms", true, KERSReasonCold, rpm, 50000, vMax, iMax, false, "cold"},
 		{"hot disarms", true, KERSReasonHot, rpm, 50000, vMax, iMax, false, "hot"},
+		{"unknown disarms", true, KERSReasonUnknown, rpm, 50000, vMax, iMax, false, "off"},
 		{"disabled", false, KERSReasonNone, rpm, 50000, vMax, iMax, false, "off"},
 		{"standstill", true, KERSReasonNone, 0, 50000, vMax, iMax, false, "standstill"},
 		{"just below engage speed", true, KERSReasonNone, regenEngageMinWheelRPM - 1, 50000, vMax, iMax, false, "standstill"},
@@ -66,13 +67,14 @@ func TestAppRegenStateUsesCommandedPolicy(t *testing.T) {
 	)
 
 	ecu := &ECU{kersActive: true}
-	app := &App{ecu: ecu, lastKersReason: KERSReasonNone}
+	app := &App{ecu: ecu, kers: &KERSController{reason: KERSReasonNone}}
 	status := Status{
 		KersActive:           false, // stale Status4 snapshot
 		RPM:                  wheelRPM,
 		Voltage:              vPackMV,
 		AcceptedRegenVoltage: vMaxMV,
 		AcceptedRegenCurrent: iMaxMA,
+		KersReasonOff:        string(KERSReasonNone),
 	}
 
 	got := app.regenState(status)

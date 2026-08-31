@@ -30,7 +30,7 @@ type Status struct {
 	RawSpeed             uint16
 	ThrottleOn           bool
 	BrakeOn              bool
-	Power                int
+	Power                int64
 	EnergyConsumed       uint64
 	EnergyRecovered      uint64
 	Temperature          int8
@@ -153,7 +153,8 @@ func (tx *IPCTx) SendStatus(s Status) error {
 	}
 	add("kers", onOff(s.KersActive), s.KersActive != l.KersActive)
 	add("boost", onOff(s.BoostEnabled), s.BoostEnabled != l.BoostEnabled)
-	add("kers-reason-off", s.KersReasonOff, s.KersReasonOff != l.KersReasonOff)
+	// kers-reason-off is owned by SetKERSReasonOff, which stores the reason
+	// before notifying. A generic CAN snapshot must never roll it backward.
 	add("kers-accepted-voltage", s.AcceptedRegenVoltage, s.AcceptedRegenVoltage != l.AcceptedRegenVoltage)
 	add("kers-accepted-current", s.AcceptedRegenCurrent, s.AcceptedRegenCurrent != l.AcceptedRegenCurrent)
 	add("regen-available", onOff(s.RegenAvailable), s.RegenAvailable != l.RegenAvailable)
@@ -198,6 +199,8 @@ func (tx *IPCTx) SendStatus(s Status) error {
 
 	// Only suppress unchanged fields after Redis has confirmed the update.
 	// Otherwise an identical later Status3 must be able to retry the write.
+	// Preserve the independently synchronized KERS reason across this snapshot.
+	s.KersReasonOff = tx.last.KersReasonOff
 	tx.last = s
 	tx.hasLast = true
 	return nil
@@ -295,9 +298,31 @@ func (tx *IPCTx) PublishKERS() error {
 	return err
 }
 
-// PublishKERSReasonOff notifies subscribers that the KERS-off reason changed.
+// SetKERSReasonOff stores the reason before synchronously notifying subscribers.
+// The status cache advances only after both Redis operations succeed.
+func (tx *IPCTx) SetKERSReasonOff(reason KERSReason) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	wireReason := string(reason)
+	if reason == KERSReasonUnknown {
+		// Keep the established public enum stable. Internally unknown remains a
+		// fail-safe inhibit; externally the general regen reason reports "off".
+		wireReason = string(KERSReasonNone)
+	}
+	if _, err := tx.raw.HSet(tx.ctx, ecuHashKey, "kers-reason-off", wireReason).Result(); err != nil {
+		return err
+	}
+	if _, err := tx.client.Publish(ecuChannel, "kers-reason-off", ipc.Sync()); err != nil {
+		return err
+	}
+	tx.last.KersReasonOff = wireReason
+	return nil
+}
+
+// PublishKERSReasonOff is retained for callers that only need notification.
 func (tx *IPCTx) PublishKERSReasonOff() error {
-	_, err := tx.client.Publish(ecuChannel, "kers-reason-off")
+	_, err := tx.client.Publish(ecuChannel, "kers-reason-off", ipc.Sync())
 	return err
 }
 

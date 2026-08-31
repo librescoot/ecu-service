@@ -63,17 +63,29 @@ func (b *BatteryTracker) ActiveTempState() TempState {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	result := TempUnknown
-	anyActive := false
-	for _, s := range b.states {
-		if !s.active {
-			continue
+	// Fail-safe precedence is independent of slot order: hot outranks cold,
+	// which outranks an unknown sensor/state, which outranks ideal.
+	precedence := func(temp TempState) int {
+		switch temp {
+		case TempHot:
+			return 4
+		case TempCold:
+			return 3
+		case TempUnknown:
+			return 2
+		case TempIdeal:
+			return 1
+		default:
+			return 2
 		}
-		if !anyActive {
-			anyActive = true
+	}
+
+	result := TempUnknown
+	best := 0
+	for _, s := range b.states {
+		if s.active && precedence(s.tempState) > best {
 			result = s.tempState
-		} else if s.tempState != TempIdeal {
-			result = s.tempState
+			best = precedence(s.tempState)
 		}
 	}
 	return result

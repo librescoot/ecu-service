@@ -18,20 +18,29 @@ type Diagnostics struct {
 	mu            sync.Mutex
 	currentFault  Fault // committed to Redis
 	pendingFault  Fault // currently being reported by ECU
+	pendingSince  time.Time
 	updateTimer   *time.Timer
 	clearTimer    *time.Timer
 	onFaultChange func(fault Fault, cfg FaultConfig)
 	log           *Logger
+	updateDelay   time.Duration
+	clearDelay    time.Duration
 }
 
 func newDiagnostics(ctx context.Context, log *Logger, onFaultChange func(Fault, FaultConfig)) *Diagnostics {
+	return newDiagnosticsWithDurations(ctx, log, faultUpdateDelay, faultClearTimeout, onFaultChange)
+}
+
+func newDiagnosticsWithDurations(ctx context.Context, log *Logger, updateDelay, clearDelay time.Duration, onFaultChange func(Fault, FaultConfig)) *Diagnostics {
 	d := &Diagnostics{
 		log:           log,
 		onFaultChange: onFaultChange,
+		updateDelay:   updateDelay,
+		clearDelay:    clearDelay,
 	}
-	d.updateTimer = time.NewTimer(faultUpdateDelay)
+	d.updateTimer = time.NewTimer(updateDelay)
 	d.updateTimer.Stop()
-	d.clearTimer = time.NewTimer(faultClearTimeout)
+	d.clearTimer = time.NewTimer(clearDelay)
 	d.clearTimer.Stop()
 
 	go d.timerLoop(ctx)
@@ -48,8 +57,16 @@ func (d *Diagnostics) timerLoop(ctx context.Context) {
 			d.mu.Lock()
 			f := d.pendingFault
 			if f != FaultNone && f != d.currentFault {
+				// A prior timer event may already have been selected when Update
+				// installs a newer transition. Never let that stale event commit
+				// the new fault before its own full stability interval.
+				if remaining := d.updateDelay - time.Since(d.pendingSince); remaining > 0 {
+					d.updateTimer.Reset(remaining)
+					d.mu.Unlock()
+					continue
+				}
 				d.currentFault = f
-				cfg := faultConfigs[f]
+				_, cfg := MapFault(uint32(f))
 				d.mu.Unlock()
 				d.log.Warn("Fault committed: code=%d (%s)", f, cfg.Description)
 				d.onFaultChange(f, cfg)
@@ -60,6 +77,11 @@ func (d *Diagnostics) timerLoop(ctx context.Context) {
 		case <-d.clearTimer.C:
 			d.mu.Lock()
 			if d.pendingFault == FaultNone && d.currentFault != FaultNone {
+				if remaining := d.clearDelay - time.Since(d.pendingSince); remaining > 0 {
+					d.clearTimer.Reset(remaining)
+					d.mu.Unlock()
+					continue
+				}
 				d.currentFault = FaultNone
 				d.mu.Unlock()
 				d.log.Info("Fault cleared")
@@ -78,53 +100,33 @@ func (d *Diagnostics) Update(code uint32) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if fault == d.currentFault {
-		// Fault state unchanged. If the fault is active and a clear countdown
-		// is running (briefly got FaultNone earlier), cancel it.
-		if fault != FaultNone {
-			if !d.clearTimer.Stop() {
-				select {
-				case <-d.clearTimer.C:
-				default:
-				}
-			}
-			d.clearTimer.Reset(faultClearTimeout)
-		}
+	// Debounce is transition-driven: another report of the same pending state
+	// must not restart its timer and starve a commit or clear indefinitely.
+	if fault == d.pendingFault {
 		return
 	}
-
-	// Fault differs from what we've committed.
 	d.pendingFault = fault
+	d.pendingSince = time.Now()
 
+	stopTimer(d.updateTimer)
+	stopTimer(d.clearTimer)
+
+	// Returning to the committed state only cancels the opposite transition.
+	if fault == d.currentFault {
+		return
+	}
 	if fault == FaultNone {
-		// Fault disappeared — wait 5s before clearing.
-		if !d.updateTimer.Stop() {
-			select {
-			case <-d.updateTimer.C:
-			default:
-			}
-		}
-		if !d.clearTimer.Stop() {
-			select {
-			case <-d.clearTimer.C:
-			default:
-			}
-		}
-		d.clearTimer.Reset(faultClearTimeout)
+		d.clearTimer.Reset(d.clearDelay)
 	} else {
-		// New fault — commit after 500ms of stability.
-		if !d.clearTimer.Stop() {
-			select {
-			case <-d.clearTimer.C:
-			default:
-			}
+		d.updateTimer.Reset(d.updateDelay)
+	}
+}
+
+func stopTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
 		}
-		if !d.updateTimer.Stop() {
-			select {
-			case <-d.updateTimer.C:
-			default:
-			}
-		}
-		d.updateTimer.Reset(faultUpdateDelay)
 	}
 }
