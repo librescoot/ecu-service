@@ -4,7 +4,7 @@ Part of the [Librescoot](https://librescoot.org/) open-source platform.
 
 `ecu-service` bridges a supported Bosch motor controller from SocketCAN to the
 Librescoot Redis IPC surface. It is intended to run on the vehicle, alongside
-Redis and the CAN interface connected to the controller. On unu vehicles, the
+Redis and the CAN interface connected to the controller. On the unu Scooter Pro, the
 Bosch ECU is a licensed, white-labeled Lingbo LBMC controller with CAN support.
 
 ## Capabilities
