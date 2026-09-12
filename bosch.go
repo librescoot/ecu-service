@@ -635,13 +635,16 @@ func formatAppVersion(v byte) string {
 	return fmt.Sprintf("%d", v)
 }
 
+func correctedSpeed(raw float64) uint16 {
+	return uint16(math.Round(raw * CalibrationFactor * SpeedToleranceFactor))
+}
+
 func (b *ECU) calibratedSpeed(raw uint16) uint16 {
 	if raw == 0 {
 		b.speedBuf.reset()
 		return 0
 	}
-	avg := b.speedBuf.movingAverage(raw)
-	return uint16(math.Round(avg * CalibrationFactor * SpeedToleranceFactor))
+	return correctedSpeed(b.speedBuf.movingAverage(raw))
 }
 
 func (b *ECU) updatePower() {
@@ -971,6 +974,11 @@ func (b *ECU) RawSpeed() uint16 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.rawSpeed
+}
+func (b *ECU) CorrectedSpeed() uint16 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return correctedSpeed(float64(b.rawSpeed))
 }
 func (b *ECU) ThrottleOn() bool {
 	b.mu.RLock()

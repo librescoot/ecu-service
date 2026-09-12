@@ -28,6 +28,7 @@ type Status struct {
 	RPM                  uint16
 	Speed                uint16
 	RawSpeed             uint16
+	CorrectedSpeed       uint16 // circumference-corrected, without moving-average filtering
 	ThrottleOn           bool
 	BrakeOn              bool
 	Power                int64
@@ -140,6 +141,7 @@ func (tx *IPCTx) SendStatus(s Status) error {
 	add("rpm", s.RPM, s.RPM != l.RPM)
 	add("speed", s.Speed, s.Speed != l.Speed)
 	add("raw-speed", s.RawSpeed, s.RawSpeed != l.RawSpeed)
+	add("corrected-speed", s.CorrectedSpeed, s.CorrectedSpeed != l.CorrectedSpeed)
 	add("throttle", onOff(s.ThrottleOn), s.ThrottleOn != l.ThrottleOn)
 	add("brake", onOff(s.BrakeOn), s.BrakeOn != l.BrakeOn)
 	add("power", s.Power, s.Power != l.Power)

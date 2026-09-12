@@ -391,6 +391,7 @@ func (a *App) onFrame(genuineStatus3 bool) {
 		RPM:                  a.ecu.RPM(),
 		Speed:                a.ecu.Speed(),
 		RawSpeed:             a.ecu.RawSpeed(),
+		CorrectedSpeed:       a.ecu.CorrectedSpeed(),
 		ThrottleOn:           a.ecu.ThrottleOn(),
 		BrakeOn:              a.ecu.BrakeOn(),
 		Power:                a.ecu.Power(),

@@ -137,6 +137,23 @@ func TestSetKERSReasonOffFailureDoesNotAdvanceCache(t *testing.T) {
 	}
 }
 
+func TestSendStatusPublishesAllSpeedStages(t *testing.T) {
+	tx, mr := newTestTx(t)
+
+	if err := tx.SendStatus(Status{Speed: 18, RawSpeed: 15, CorrectedSpeed: 17}); err != nil {
+		t.Fatal(err)
+	}
+	for field, want := range map[string]string{
+		"speed":           "18",
+		"raw-speed":       "15",
+		"corrected-speed": "17",
+	} {
+		if got := mr.HGet(ecuHashKey, field); got != want {
+			t.Errorf("%s = %q, want %q", field, got, want)
+		}
+	}
+}
+
 func TestSendStatusDoesNotPublishInvalidOdometer(t *testing.T) {
 	tx, mr := newTestTx(t)
 

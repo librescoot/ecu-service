@@ -131,6 +131,26 @@ func TestStatus1_SpeedCalibrated(t *testing.T) {
 	if ecu.Speed() != expected {
 		t.Errorf("speed: expected %d, got %d", expected, ecu.Speed())
 	}
+	if ecu.CorrectedSpeed() != expected {
+		t.Errorf("corrected speed: expected %d, got %d", expected, ecu.CorrectedSpeed())
+	}
+}
+
+func TestStatus1_CorrectedSpeedIsUnfiltered(t *testing.T) {
+	ecu := newTestECU()
+	data := make([]byte, 8)
+	data[6] = 30
+	ecu.HandleFrame(makeFrame(frameStatus1, data))
+	data[6] = 10
+	ecu.HandleFrame(makeFrame(frameStatus1, data))
+
+	expected := correctedSpeed(10)
+	if ecu.CorrectedSpeed() != expected {
+		t.Errorf("corrected speed: expected latest sample %d, got %d", expected, ecu.CorrectedSpeed())
+	}
+	if ecu.Speed() == expected {
+		t.Errorf("filtered speed unexpectedly matched latest corrected sample %d", expected)
+	}
 }
 
 func TestStatus1_ThrottleOn(t *testing.T) {
