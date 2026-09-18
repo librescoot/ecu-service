@@ -189,3 +189,61 @@ func TestRedisHDelNotificationsResetBatteryAndSettings(t *testing.T) {
 	current, voltage = kersSettings()
 	t.Fatalf("HDEL did not reset state: temp=%v current=%d voltage=%d", battery.ActiveTempState(), current, voltage)
 }
+
+// TestVehiclePowerEdgeVoidsStateAssertion: the rail drops and comes back inside
+// what the CommLostWatcher tick can see. Both pub/sub messages still arrive, so
+// the power command follows the rail and the assertion is voided.
+func TestVehiclePowerEdgeVoidsStateAssertion(t *testing.T) {
+	tx, mr := newTestTx(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ecu := newTestECU()
+	ecu.kersVoltage = DefaultKersVoltage
+	ecu.powerCmd = powerOn
+	ecu.stateAssertedToECU = true
+	ecu.stateAckedByECU = true
+	ecu.gearsSentOnPower = true
+
+	kers := newKERSControllerWithDelay(ctx, time.Millisecond, func(bool) {}, func(KERSReason) {})
+	rx := newIPCRx(tx.client, newLogger(LogLevelNone), &BatteryTracker{}, kers, ecu)
+	rx.watchVehicle()
+
+	waitFor := func(desc string, condition func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if condition() {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s", desc)
+	}
+	power := func() powerCommand {
+		ecu.mu.RLock()
+		defer ecu.mu.RUnlock()
+		return ecu.powerCmd
+	}
+
+	// The rail goes down and comes straight back up, as it does when a pack is
+	// pulled and re-seated. No watchdog tick is involved.
+	mr.HSet("vehicle", "engine-power", "on")
+	mr.HSet("vehicle", "main-power", "off")
+	mr.Publish("vehicle", "main-power")
+	waitFor("rail down", func() bool { return power() == powerOff })
+
+	mr.HSet("vehicle", "main-power", "on")
+	mr.Publish("vehicle", "main-power")
+	waitFor("rail up", func() bool { return power() == powerOn })
+
+	ecu.mu.RLock()
+	defer ecu.mu.RUnlock()
+	if ecu.stateAckedByECU {
+		t.Error("the assertion acked before the power cycle must not outlive it")
+	}
+	if ecu.gearsSentOnPower {
+		t.Error("the gear ratios must be re-sent after a power cycle")
+	}
+}

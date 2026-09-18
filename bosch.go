@@ -275,6 +275,13 @@ const faultCodeBrakeApplied = 15
 // used to be visible only as missing rows in a once-a-second firmware line.
 const ecuSilenceLogAfter = 2 * time.Second
 
+// ecuAssertResendGap is the receive gap above which the commanded state is
+// re-sent on the frame that ends the gap: a rebooted controller stays quiet
+// after its boot burst until it is sent EBS Set/Control, so an assertion acked
+// before the gap is not in force. Safe on a benign dropout, because the repair
+// rides a received frame and is therefore acknowledged.
+const ecuAssertResendGap = time.Second
+
 // ecuAssertHoldAfterPowerOn defers the first blind state assertion past the
 // controller's boot. A stock Bosch controller is up in ~1.2s; the replacement
 // board takes 5s and more. Asserting on the power edge put both frames on the
@@ -304,8 +311,18 @@ func (b *ECU) HandleFrame(frame can.Frame) bool {
 	}
 
 	now := time.Now()
-	if gap := now.Sub(b.lastFrameTime); gap > ecuSilenceLogAfter {
+	gap := now.Sub(b.lastFrameTime)
+	if gap > ecuSilenceLogAfter {
 		b.log.Info("ECU frames resumed after %.1fs of silence", gap.Seconds())
+	}
+	// Void the assertion so the assert below goes out on this frame instead of
+	// waiting for another writer to change the commanded state.
+	if gap > ecuAssertResendGap {
+		if b.stateAckedByECU {
+			b.log.Info("ECU silent for %.1fs, re-asserting commanded state", gap.Seconds())
+		}
+		b.stateAckedByECU = false
+		b.gearsSentOnPower = false
 	}
 	b.lastFrameTime = now
 	b.sawFrame = true

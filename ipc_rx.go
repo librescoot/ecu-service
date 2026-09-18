@@ -52,9 +52,25 @@ func (rx *IPCRx) watchVehicle() {
 		rx.kers.SetReadyToDrive(state == "ready-to-drive")
 		return nil
 	})
+	// Handle supply edges on the message rather than on the CommLostWatcher
+	// tick: a rail off-pulse shorter than 500ms is invisible to the tick, which
+	// left a re-seated pack's controller unconfigured and silent.
+	w.OnField("engine-power", func(string) error { return rx.syncEcuPower() })
+	w.OnField("main-power", func(string) error { return rx.syncEcuPower() })
 	if err := w.StartWithSync(); err != nil {
 		rx.log.Error("vehicle watcher: %v", err)
 	}
+}
+
+// syncEcuPower re-reads both supply fields: the ECU is only expected to talk
+// when engine-power is on and the 48V rail is up.
+func (rx *IPCRx) syncEcuPower() error {
+	fields, err := rx.client.HGetAll("vehicle")
+	if err != nil {
+		return fmt.Errorf("HGetAll vehicle: %w", err)
+	}
+	rx.ecu.SetPowered(fields["engine-power"] == "on" && fields["main-power"] == "on")
+	return nil
 }
 
 func (rx *IPCRx) watchBattery(idx int) {
