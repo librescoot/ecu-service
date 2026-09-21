@@ -81,7 +81,7 @@ func TestCommLostWatcher_SilentAtRestLogsOnceThenRecovers(t *testing.T) {
 // TestCommLostWatcher_MovingStaleStillRaises is the pre-existing mid-ride
 // case: it must keep working once the moving gate is gone.
 func TestCommLostWatcher_MovingStaleStillRaises(t *testing.T) {
-	ecu, _ := newGatedECU()
+	ecu, bus := newGatedECU()
 	ecu.powerCmd = powerOn
 	ecu.speed = 15
 	ecu.lastFrameTime = time.Now().Add(-pastGrace)
@@ -90,6 +90,9 @@ func TestCommLostWatcher_MovingStaleStillRaises(t *testing.T) {
 
 	if !w.evaluate(true) {
 		t.Fatal("expected E20 to raise for a stale, powered ECU mid-ride")
+	}
+	if ids := bus.ids(); len(ids) != 0 {
+		t.Fatalf("a stale ECU sent %#x, want no probe", ids)
 	}
 }
 

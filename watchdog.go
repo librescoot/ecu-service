@@ -8,17 +8,7 @@ import (
 )
 
 const (
-	commLostTick = 500 * time.Millisecond
-	// commLostPollAfter: prod the ECU with 0x4EF only once we haven't heard from
-	// it this long. Once up, a powered ECU broadcasts Status frames unprompted
-	// on its own regardless of speed (measured on-vehicle: continuous Status1 /
-	// Status3 traffic with the scooter stationary, no further polling needed
-	// once the first frame arrived); this poll only covers the gap between
-	// power-on and that first frame.
-	commLostPollAfter = 700 * time.Millisecond
-	// commLostRaiseAfter is deliberately longer than pollAfter + worst-case ECU
-	// reply latency (the 0x7E0-0x7E8 burst is spread over ~1s), so a fresh poll's
-	// own response has time to land before we'd flag comm lost.
+	commLostTick       = 500 * time.Millisecond
 	commLostRaiseAfter = 3 * time.Second
 	// ecuColdStartWorst is the longest measured delay between engine_power going
 	// on and the controller's first CAN frame. It is not one number: it varies by
@@ -126,9 +116,7 @@ func (w *CommLostWatcher) check() {
 	// unacknowledged frames eventually latch the controller bus-off.
 	w.ecu.SetPowered(ecuPowered)
 	// Re-assert the commanded KERS and boost state until the controller answers.
-	// The Control frame is answered with 0x7E4 where a status request is ignored
-	// until the controller has booted, so this, not RequestStatus, is what gets a
-	// slow-booting ECU both configured and talking. No-ops once acknowledged.
+	// The Control frame is answered with 0x7E4 and no-ops once acknowledged.
 	w.ecu.ApplyCommandedState()
 
 	shouldRaise := w.evaluate(ecuPowered)
@@ -154,9 +142,8 @@ func (w *CommLostWatcher) check() {
 }
 
 // evaluate applies the power/staleness state to decide whether E20 should be
-// raised, polling the ECU (0x4EF) if we're overdue and tracking the power-on
-// grace edge along the way. Split out from check() so the decision itself can
-// be tested without a live IPC connection.
+// raised and tracks the power-on grace edge along the way. Split out from
+// check() so the decision itself can be tested without a live IPC connection.
 func (w *CommLostWatcher) evaluate(ecuPowered bool) bool {
 	now := time.Now()
 	if ecuPowered && !w.prevEcuPowered {
@@ -164,10 +151,6 @@ func (w *CommLostWatcher) evaluate(ecuPowered bool) bool {
 	}
 	w.prevEcuPowered = ecuPowered
 	inGrace := !w.powerOnEdge.IsZero() && now.Sub(w.powerOnEdge) < commLostPowerOnGrace
-
-	if ecuPowered && w.ecu.TimeSinceLastFrame() > commLostPollAfter {
-		w.ecu.RequestStatus()
-	}
 
 	// Measure staleness from the more recent of {last frame, power-on edge}, so a
 	// frame timestamp carried over from a previous power cycle doesn't trip the

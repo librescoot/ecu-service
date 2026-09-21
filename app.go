@@ -242,7 +242,6 @@ func (a *App) runCANBusLoop(ctx context.Context) {
 		}
 
 		bus.Subscribe((*appHandler)(a))
-		a.ecu.RequestStatus()
 
 		if err := bus.ConnectAndPublish(); err != nil {
 			a.log.Error("CAN bus error: %v", err)

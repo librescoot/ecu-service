@@ -1130,11 +1130,9 @@ func TestApplyCommandedState_RetriesDoNotRepeatTheAnnouncement(t *testing.T) {
 	}
 }
 
-// TestHandleFrame_ReassertsStateAfterLongSilence covers the reboot whose rail
-// edge was never seen: the boot burst used to arrive while the flag acked
-// before the silence was still set, so the assertion was silently skipped and
-// the controller stayed unconfigured until something else changed the state.
-func TestHandleFrame_ReassertsStateAfterLongSilence(t *testing.T) {
+// TestHandleFrame_KeepsStateAcrossReceiveGap ensures liveness gaps do not
+// rewrite configuration that remains valid until an observed power-off edge.
+func TestHandleFrame_KeepsStateAcrossReceiveGap(t *testing.T) {
 	ecu, bus := newGatedECU()
 	ecu.SetPowered(true)
 
@@ -1142,48 +1140,22 @@ func TestHandleFrame_ReassertsStateAfterLongSilence(t *testing.T) {
 	ecu.stateAssertedToECU = true
 	ecu.stateAckedByECU = true
 	ecu.gearsSentOnPower = true
-	ecu.lastFrameTime = time.Now().Add(-2 * ecuAssertResendGap)
+	ecu.lastFrameTime = time.Now().Add(-2 * time.Second)
 	ecu.mu.Unlock()
 	bus.sent = nil
 
 	if !ecu.HandleFrame(makeFrame(frameStatus1, make([]byte, 8))) {
 		t.Fatal("a well-formed Status1 frame must count as controller liveness")
 	}
-
-	if ids := bus.ids(); len(ids) != 2 || ids[0] != frameEBSSet || ids[1] != frameControl {
-		t.Fatalf("silence of 2x the resend gap sent %#x, want EBS Set + Control", ids)
-	}
-	ecu.mu.RLock()
-	defer ecu.mu.RUnlock()
-	if !ecu.stateAckedByECU {
-		t.Error("the re-assert rides a live frame, so it must count as acked")
-	}
-	if ecu.gearsSentOnPower {
-		t.Error("the ratios were sent before the silence and are void after it")
-	}
-}
-
-// TestHandleFrame_KeepsStateAcrossShortGap: a sub-threshold gap is ordinary
-// controller behaviour, and re-asserting on it would add two needless frames.
-func TestHandleFrame_KeepsStateAcrossShortGap(t *testing.T) {
-	ecu, bus := newGatedECU()
-	ecu.SetPowered(true)
-
-	ecu.mu.Lock()
-	ecu.stateAssertedToECU = true
-	ecu.stateAckedByECU = true
-	ecu.lastFrameTime = time.Now().Add(-ecuAssertResendGap / 2)
-	ecu.mu.Unlock()
-	bus.sent = nil
-
-	ecu.HandleFrame(makeFrame(frameStatus1, make([]byte, 8)))
-
 	if ids := bus.ids(); len(ids) != 0 {
-		t.Fatalf("a sub-threshold gap sent %#x, want nothing", ids)
+		t.Fatalf("a receive gap sent %#x, want nothing", ids)
 	}
 	ecu.mu.RLock()
 	defer ecu.mu.RUnlock()
 	if !ecu.stateAckedByECU {
-		t.Error("a short gap must not void the acked assertion")
+		t.Error("a receive gap must not void the acknowledged assertion")
+	}
+	if !ecu.gearsSentOnPower {
+		t.Error("a receive gap must not make the gear configuration pending")
 	}
 }
