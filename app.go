@@ -31,6 +31,7 @@ type App struct {
 	ipcTx    *IPCTx
 	ipcRx    *IPCRx
 	commLost *CommLostWatcher
+	canLink  *CanLinkWatcher
 
 	// busMu guards bus, which the CAN reconnect loop swaps out on resume.
 	busMu sync.Mutex
@@ -134,6 +135,16 @@ func NewApp(ctx context.Context, opts Options) (*App, error) {
 	a.ipcRx = newIPCRx(client, log, a.battery, a.kers, a.ecu)
 	a.commLost = newCommLostWatcher(client, a.ecu, log, a.onCommLostChange)
 
+	// Sample the ECU link's state and error counters so field logs can tell a
+	// bus-off episode on this link apart from an ECU that stopped talking:
+	// both starve frames and raise E20, but only the bus-off shows an edge here.
+	link, err := newRTNetlinkCanLink(opts.CANDevice)
+	if err != nil {
+		log.Warn("CAN link monitoring unavailable on %s: %v", opts.CANDevice, err)
+	} else {
+		a.canLink = newCanLinkWatcher(link, opts.CANDevice, log)
+	}
+
 	return a, nil
 }
 
@@ -206,6 +217,11 @@ func (a *App) Run(ctx context.Context) error {
 
 	// Watch for ECU comm loss (raises E20).
 	go a.commLost.Run(ctx)
+
+	// Watch the ECU CAN link for bus-off and other state transitions.
+	if a.canLink != nil {
+		go a.canLink.Run(ctx)
+	}
 
 	// Summarise what the controller is actually sending.
 	go a.runFrameSummary(ctx)
