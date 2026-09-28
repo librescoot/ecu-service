@@ -996,6 +996,12 @@ func (b *ECU) Temperature() int8 {
 	defer b.mu.RUnlock()
 	return b.temperature
 }
+func (b *ECU) InvalidateFault() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.faultCode = 0
+}
+
 func (b *ECU) FaultCode() uint32 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

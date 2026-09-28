@@ -33,6 +33,10 @@ type App struct {
 	commLost *CommLostWatcher
 	canLink  *CanLinkWatcher
 
+	// Serialize CAN fault publication with watchdog transitions.
+	faultMu        sync.Mutex
+	commLostActive bool
+
 	// busMu guards bus, which the CAN reconnect loop swaps out on resume.
 	busMu sync.Mutex
 	bus   *can.Bus
@@ -178,10 +182,14 @@ func (a *App) loadCachedOdometer() error {
 	return nil
 }
 
-// onCommLostChange publishes or clears the synthetic E20 fault. On clear it
-// restores whatever fault the ECU is currently reporting (FaultNone if none).
+// E20 invalidates cached ECU faults; recovery requires a fresh Status2 report.
 func (a *App) onCommLostChange(raise bool) {
+	a.faultMu.Lock()
+	defer a.faultMu.Unlock()
+	a.commLostActive = raise
 	if raise {
+		a.ecu.InvalidateFault()
+		a.diag.Reset()
 		cfg := faultConfigs[FaultECUCommLost]
 		if err := a.ipcTx.SetFault(uint32(FaultECUCommLost), cfg.Description); err != nil {
 			a.log.Error("SetFault E20: %v", err)
@@ -192,13 +200,14 @@ func (a *App) onCommLostChange(raise bool) {
 		return
 	}
 	code := a.ecu.FaultCode()
-	fault, cfg := MapFault(code)
+	_, cfg := MapFault(code)
 	if err := a.ipcTx.SetFault(code, cfg.Description); err != nil {
 		a.log.Error("SetFault clear: %v", err)
 	}
-	if err := a.ipcTx.ReportFault(fault, cfg); err != nil {
+	if err := a.ipcTx.ReportFault(FaultNone, FaultConfig{}); err != nil {
 		a.log.Error("ReportFault clear: %v", err)
 	}
+	a.diag.Update(code)
 }
 
 func (a *App) Run(ctx context.Context) error {
@@ -391,6 +400,8 @@ func (a *App) acceptStatus3Odometer() bool {
 }
 
 func (a *App) onFrame(genuineStatus3 bool) {
+	a.faultMu.Lock()
+	defer a.faultMu.Unlock()
 	ratios := a.ecu.GearRatios()
 	sw := a.ecu.SoftwareVersion()
 	kersReason := a.kers.Reason()
@@ -438,7 +449,10 @@ func (a *App) onFrame(genuineStatus3 bool) {
 		SWBaseVersion:        sw.BaseVersion,
 		SWAppVersion:         sw.AppVersion,
 	}
-	if s.FaultCode != 0 {
+	if a.commLostActive {
+		s.FaultCode = uint32(FaultECUCommLost)
+		s.FaultDesc = faultConfigs[FaultECUCommLost].Description
+	} else if s.FaultCode != 0 {
 		_, cfg := MapFault(s.FaultCode)
 		s.FaultDesc = cfg.Description
 		// A code with no entry in the table is a gap we want to hear about. This
@@ -503,7 +517,9 @@ func (a *App) onFrame(genuineStatus3 bool) {
 		}
 	}
 
-	a.diag.Update(s.FaultCode)
+	if !a.commLostActive {
+		a.diag.Update(s.FaultCode)
+	}
 
 	// KERS is only changed while stopped; reconcile if the ECU re-enabled it
 	// despite a non-none reason.

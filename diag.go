@@ -67,9 +67,9 @@ func (d *Diagnostics) timerLoop(ctx context.Context) {
 				}
 				d.currentFault = f
 				_, cfg := MapFault(uint32(f))
-				d.mu.Unlock()
 				d.log.Warn("Fault committed: code=%d (%s)", f, cfg.Description)
 				d.onFaultChange(f, cfg)
+				d.mu.Unlock()
 			} else {
 				d.mu.Unlock()
 			}
@@ -83,9 +83,9 @@ func (d *Diagnostics) timerLoop(ctx context.Context) {
 					continue
 				}
 				d.currentFault = FaultNone
-				d.mu.Unlock()
 				d.log.Info("Fault cleared")
 				d.onFaultChange(FaultNone, FaultConfig{})
+				d.mu.Unlock()
 			} else {
 				d.mu.Unlock()
 			}
@@ -93,7 +93,19 @@ func (d *Diagnostics) timerLoop(ctx context.Context) {
 	}
 }
 
-// Update is called on every Status2 frame with the raw fault code from the ECU.
+// Reset cancels pending transitions and waits for in-flight publication. Callbacks
+// run under mu and must not call Diagnostics methods.
+func (d *Diagnostics) Reset() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	stopTimer(d.updateTimer)
+	stopTimer(d.clearTimer)
+	d.currentFault = FaultNone
+	d.pendingFault = FaultNone
+	d.pendingSince = time.Time{}
+}
+
+// Update supplies the latest raw ECU fault code.
 func (d *Diagnostics) Update(code uint32) {
 	fault, _ := MapFault(code)
 
