@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -122,12 +123,31 @@ type CanLinkWatcher struct {
 	ifname string
 	log    *Logger
 
+	mu           sync.Mutex
+	sampledAt    time.Time
+	sampledState canState
+
 	havePrev bool
 	prev     canLinkSample
 }
 
 func newCanLinkWatcher(src canLinkReader, ifname string, log *Logger) *CanLinkWatcher {
 	return &CanLinkWatcher{src: src, ifname: ifname, log: log}
+}
+
+// Failure ignores expired samples so a failed monitor cannot latch E20.
+func (w *CanLinkWatcher) Failure(now time.Time) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.sampledAt.IsZero() || now.Sub(w.sampledAt) > 3*canLinkTick {
+		return ""
+	}
+	switch w.sampledState {
+	case canStateBusOff, canStateStopped, canStateSleeping:
+		return fmt.Sprintf("CAN link %s is %s", w.ifname, w.sampledState)
+	default:
+		return ""
+	}
 }
 
 func (w *CanLinkWatcher) Run(ctx context.Context) {
@@ -159,6 +179,9 @@ func (w *CanLinkWatcher) check() {
 // The check runs at 1Hz and a latched state persists, so logging conditions
 // rather than transitions would repeat the same line every second.
 func (w *CanLinkWatcher) observe(s canLinkSample) {
+	w.mu.Lock()
+	w.sampledAt, w.sampledState = time.Now(), s.State
+	w.mu.Unlock()
 	if !w.havePrev {
 		w.havePrev = true
 		w.prev = s

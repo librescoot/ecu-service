@@ -13,6 +13,7 @@ const (
 	commLostProbeAfter    = time.Second
 	commLostProbeWait     = 1500 * time.Millisecond
 	commLostProbeInterval = 3 * time.Second
+	commLostRecoveryTime  = time.Second
 	// ecuColdStartWorst is the longest measured delay between engine_power going
 	// on and the controller's first CAN frame. It is not one number: it varies by
 	// controller by a factor of four, measured with `lsc engine on`, stationary,
@@ -37,49 +38,33 @@ const (
 	// generous there. That costs nothing: the only case that waits it out is an
 	// ECU that has sent no frame at all.
 	//
-	// Only the no-frame-yet case waits this long. Staleness is measured from the
-	// more recent of {last frame, power-on edge}, so the first frame to arrive
-	// ends the window on its own and a genuinely dead ECU is still reported,
-	// just at power-on + this rather than power-on + commLostRaiseAfter.
+	// All liveness checks wait through this grace; status requests then receive
+	// their own bounded response windows.
 	commLostPowerOnGrace = 8 * time.Second
 )
 
-// CommLostWatcher raises fault E20 when the ECU should be alive and powered but
-// hasn't sent a CAN frame within commLostRaiseAfter. It is gated on vehicle
-// engine-power && main-power (so it stays quiet during standby or when 48V is
-// down), on a power-on grace window wide enough for the ECU to boot, and on the
-// last known speed being non-zero.
-//
-// That speed gate is deliberate and was reinstated after field evidence. A
-// powered controller that goes quiet while the vehicle is stopped turns out to
-// be common across the fleet rather than exceptional: controllers vary in how
-// much they report at rest, and raising E20 for it dashes the cluster at a
-// standstill for a condition the rider can do nothing about and which clears
-// itself the moment they set off. The at-rest case is logged instead, at info,
-// so it can be counted in the field without being shown to riders.
-//
-// The cost is accepted knowingly: a bus that dies while the vehicle is parked
-// and powered will not raise E20 until the vehicle moves. With a non-zero cached
-// speed, one status probe distinguishes a quiet controller from an unresponsive
-// one. A probe never refreshes liveness; only received frames do.
-//
-// Measured stationary on two controllers, both healthy. The rate differs by
-// 20x, the gap this check depends on does not:
-//
-//	replacement logic board   ~200 frames/s, occasional multi-second dropouts
-//	stock controller          10 frames/s, largest gap 0.26s over 83s
+// CommLostWatcher distinguishes silence from failure with two bounded status
+// requests, independent of cached speed. Monitoring requires both power rails
+// and completed boot grace. Transport failures are attributed separately.
+// Recovery requires sustained traffic or a separate probe response.
 type CommLostWatcher struct {
 	ipc      *ipc.Client
 	ecu      *ECU
 	log      *Logger
 	onChange func(raise bool)
 
-	published      bool
-	prevEcuPowered bool
-	powerOnEdge    time.Time
-	probeAt        time.Time
-	probeFrame     time.Time
-	probePending   bool
+	published         bool
+	prevEcuPowered    bool
+	powerOnEdge       time.Time
+	probeAt           time.Time
+	probeFrame        time.Time
+	probeAttempts     int
+	failed            bool
+	recoverySince     time.Time
+	recoveryProbeAt   time.Time
+	recoveryLastFrame time.Time
+	transportCause    func(time.Time) string
+	failureCause      string
 	// silentAtRest edges the at-rest log line. The check runs at 2Hz, and an ECU
 	// that has gone quiet stays quiet, so logging the condition rather than the
 	// transition would fill the journal for as long as it lasts.
@@ -129,7 +114,7 @@ func (w *CommLostWatcher) check() {
 	switch {
 	case shouldRaise && !w.published:
 		w.published = true
-		w.log.Warn("ECU communication lost (>%v) in state=%s, publishing E20", commLostRaiseAfter, state)
+		w.log.Warn("ECU communication lost in state=%s: %s, publishing E20", state, w.failureCause)
 		w.onChange(true)
 	case !shouldRaise && w.published:
 		w.published = false
@@ -155,7 +140,7 @@ func (w *CommLostWatcher) evaluate(ecuPowered bool) bool {
 
 func (w *CommLostWatcher) evaluateAt(ecuPowered bool, now time.Time) bool {
 	if ecuPowered != w.prevEcuPowered {
-		w.probePending = false
+		w.resetEpisode()
 	}
 	if ecuPowered && !w.prevEcuPowered {
 		w.powerOnEdge = now
@@ -168,8 +153,8 @@ func (w *CommLostWatcher) evaluateAt(ecuPowered bool, now time.Time) bool {
 	// check the instant the grace window expires.
 	lastFrame := w.ecu.LastFrameTime()
 	frameAge := now.Sub(lastFrame)
-	if lastFrame.After(w.probeFrame) {
-		w.probePending = false
+	if !w.failed && lastFrame.After(w.probeFrame) {
+		w.probeAttempts = 0
 	}
 	if !w.powerOnEdge.IsZero() {
 		if since := now.Sub(w.powerOnEdge); since < frameAge {
@@ -179,36 +164,86 @@ func (w *CommLostWatcher) evaluateAt(ecuPowered bool, now time.Time) bool {
 	stale := frameAge > commLostRaiseAfter
 	silent := stale && ecuPowered && !inGrace
 
-	// Speed is the ECU's own last reported value, so it is whatever was true when
-	// it stopped talking: non-zero means it went quiet mid-ride.
+	// Cached speed classifies the diagnostic log only, not liveness.
 	moving := w.ecu.Speed() != 0
 	w.noteSilentAtRest(silent && !moving, frameAge)
 
-	if !ecuPowered || inGrace || !moving {
+	if !ecuPowered || inGrace {
 		return false
 	}
-	// One attempt per uninterrupted silence, including failed sends. Retain the
-	// cooldown across replies and power edges to bound request-driven traffic.
-	if !w.probePending && frameAge >= commLostProbeAfter &&
+	cause := ""
+	if w.transportCause != nil {
+		cause = w.transportCause(now)
+	}
+	if cause != "" {
+		w.failed = true
+		w.recoverySince = time.Time{}
+		w.setFailureCause(cause)
+		return true
+	}
+	if w.failed {
+		// Confirm recovery with sustained traffic or a reply to a separate probe.
+		if !w.recoveryProbeAt.IsZero() && lastFrame.After(w.recoveryProbeAt) {
+			w.resetEpisode()
+			return false
+		}
+		if frameAge <= commLostRecoveryTime {
+			if w.recoverySince.IsZero() || lastFrame.Sub(w.recoveryLastFrame) > commLostRecoveryTime {
+				w.recoverySince = lastFrame
+			} else if lastFrame.Sub(w.recoverySince) >= commLostRecoveryTime {
+				w.resetEpisode()
+				return false
+			}
+		}
+		w.recoveryLastFrame = lastFrame
+		if !w.recoverySince.IsZero() {
+			if now.Sub(w.recoverySince) > commLostProbeInterval+commLostProbeWait {
+				w.recoverySince, w.recoveryProbeAt = time.Time{}, time.Time{}
+			} else if w.recoveryProbeAt.IsZero() && now.Sub(w.probeAt) >= commLostProbeInterval {
+				w.probeAt, w.recoveryProbeAt = now, now
+				w.log.Info("ECU traffic resumed, requesting recovery confirmation")
+				w.ecu.RequestStatus()
+			}
+		}
+		return true
+	}
+	// At most two attempts per silence, including failed sends. The cooldown
+	// survives replies and power edges; sending never establishes liveness.
+	if frameAge >= commLostProbeAfter && w.probeAttempts < 2 &&
 		(w.probeAt.IsZero() || now.Sub(w.probeAt) >= commLostProbeInterval) {
 		w.probeAt = now
 		w.probeFrame = lastFrame
-		w.probePending = true
-		w.log.Info("ECU silent for %.1fs at non-zero speed, requesting status", frameAge.Seconds())
+		w.probeAttempts++
+		w.log.Info("ECU silent for %.1fs, requesting status (attempt %d/2)", frameAge.Seconds(), w.probeAttempts)
 		w.ecu.RequestStatus()
 	}
-	return silent && w.probePending && now.Sub(w.probeAt) >= commLostProbeWait
+	if silent && w.probeAttempts == 2 && now.Sub(w.probeAt) >= commLostProbeWait {
+		w.failed = true
+		w.setFailureCause("no ECU response after two status requests")
+	}
+	return w.failed
 }
 
-// noteSilentAtRest logs the suppressed case on its edges. This is the only
-// record that a powered controller went quiet while stopped, so it is info
-// rather than debug: the whole point is to be able to count it in the field
-// from ordinary log packages.
+func (w *CommLostWatcher) resetEpisode() {
+	w.probeAttempts = 0
+	w.failed = false
+	w.recoverySince, w.recoveryProbeAt = time.Time{}, time.Time{}
+	w.failureCause = ""
+}
+
+func (w *CommLostWatcher) setFailureCause(cause string) {
+	if cause != w.failureCause {
+		w.log.Warn("ECU communication unavailable: %s", cause)
+		w.failureCause = cause
+	}
+}
+
+// noteSilentAtRest records stationary silence independently of probe results.
 func (w *CommLostWatcher) noteSilentAtRest(silent bool, frameAge time.Duration) {
 	switch {
 	case silent && !w.silentAtRest:
 		w.silentAtRest = true
-		w.log.Info("ECU silent at rest: powered, no frame for %.1fs, speed 0. E20 suppressed while stopped", frameAge.Seconds())
+		w.log.Info("ECU silent at rest: powered, no frame for %.1fs, speed 0; checking responsiveness", frameAge.Seconds())
 	case !silent && w.silentAtRest:
 		w.silentAtRest = false
 		w.log.Info("ECU no longer silent at rest")

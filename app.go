@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/brutella/can"
@@ -21,17 +22,18 @@ const (
 )
 
 type App struct {
-	opts     Options
-	log      *Logger
-	ipc      *ipc.Client
-	ecu      *ECU
-	battery  *BatteryTracker
-	kers     *KERSController
-	diag     *Diagnostics
-	ipcTx    *IPCTx
-	ipcRx    *IPCRx
-	commLost *CommLostWatcher
-	canLink  *CanLinkWatcher
+	opts              Options
+	log               *Logger
+	ipc               *ipc.Client
+	ecu               *ECU
+	battery           *BatteryTracker
+	kers              *KERSController
+	diag              *Diagnostics
+	ipcTx             *IPCTx
+	ipcRx             *IPCRx
+	commLost          *CommLostWatcher
+	canLink           *CanLinkWatcher
+	socketUnavailable atomic.Bool
 
 	// Serialize CAN fault publication with watchdog transitions.
 	faultMu        sync.Mutex
@@ -138,6 +140,7 @@ func NewApp(ctx context.Context, opts Options) (*App, error) {
 
 	a.ipcRx = newIPCRx(client, log, a.battery, a.kers, a.ecu)
 	a.commLost = newCommLostWatcher(client, a.ecu, log, a.onCommLostChange)
+	a.commLost.transportCause = a.ecuTransportCause
 
 	// Sample the ECU link's state and error counters so field logs can tell a
 	// bus-off episode on this link apart from an ECU that stopped talking:
@@ -271,6 +274,7 @@ func (a *App) runCANBusLoop(ctx context.Context) {
 		if err := bus.ConnectAndPublish(); err != nil {
 			a.log.Error("CAN bus error: %v", err)
 		}
+		a.socketUnavailable.Store(true)
 
 		select {
 		case <-ctx.Done():
@@ -369,7 +373,20 @@ func (h *appHandler) Handle(frame can.Frame) {
 	if !a.ecu.HandleFrame(frame) {
 		return
 	}
+	a.socketUnavailable.Store(false)
 	a.onFrame(frame.ID == frameStatus3)
+}
+
+func (a *App) ecuTransportCause(now time.Time) string {
+	if a.canLink != nil {
+		if cause := a.canLink.Failure(now); cause != "" {
+			return cause
+		}
+	}
+	if a.socketUnavailable.Load() {
+		return "CAN receive socket unavailable; awaiting valid ECU traffic"
+	}
+	return ""
 }
 
 func (a *App) regenState(s Status) RegenState {

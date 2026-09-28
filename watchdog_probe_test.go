@@ -6,158 +6,169 @@ import (
 	"time"
 )
 
-func TestCommLostProbeBoundedOutage(t *testing.T) {
-	ecu, bus := newGatedECU()
-	ecu.powerCmd = powerOn
-	ecu.speed = 15
-	now := time.Now()
-	ecu.lastFrameTime = now
-	w := newTestCommLostWatcher(ecu, pastGrace)
-	for tick := 0; tick <= 120; tick++ {
-		elapsed := time.Duration(tick) * commLostTick
-		raised := w.evaluateAt(true, now.Add(elapsed))
-		if want := elapsed > commLostRaiseAfter; raised != want {
-			t.Fatalf("at %v: E20=%t, want %t", elapsed, raised, want)
+func TestCommLostBoundedRetries(t *testing.T) {
+	for _, speed := range []uint16{0, 15} {
+		for _, failSend := range []bool{false, true} {
+			ecu, bus := newGatedECU()
+			ecu.powerCmd, ecu.speed = powerOn, speed
+			if failSend {
+				bus.err = errors.New("CAN unavailable")
+			}
+			now := time.Now()
+			ecu.lastFrameTime = now
+			w := newTestCommLostWatcher(ecu, pastGrace)
+			for tick := 0; tick <= 120; tick++ {
+				elapsed := time.Duration(tick) * commLostTick
+				raised := w.evaluateAt(true, now.Add(elapsed))
+				want := elapsed >= commLostProbeAfter+commLostProbeInterval+commLostProbeWait
+				if raised != want {
+					t.Fatalf("speed=%d fail=%t at %v: raised=%t want=%t", speed, failSend, elapsed, raised, want)
+				}
+			}
+			if w.probeAttempts != 2 {
+				t.Fatalf("attempts=%d", w.probeAttempts)
+			}
+			if !failSend && len(bus.ids()) != 2 {
+				t.Fatalf("outage frames=%#x", bus.ids())
+			}
+			if !ecu.LastFrameTime().Equal(now) {
+				t.Fatal("send fabricated freshness")
+			}
 		}
 	}
-	if ids := bus.ids(); len(ids) != 1 || ids[0] != frameStatusReq {
-		t.Fatalf("one-minute outage sent %#x", ids)
-	}
-	if !ecu.LastFrameTime().Equal(now) {
-		t.Fatal("probe fabricated frame freshness")
+}
+
+func TestCommLostProbeReplies(t *testing.T) {
+	for _, onRetry := range []bool{false, true} {
+		ecu, bus := newGatedECU()
+		ecu.powerCmd, ecu.speed = powerOn, 15
+		ecu.stateAssertedToECU, ecu.stateAckedByECU = true, true
+		now := time.Now()
+		ecu.lastFrameTime = now.Add(-time.Minute)
+		w := newTestCommLostWatcher(ecu, pastGrace)
+		w.evaluateAt(true, now)
+		ecu.HandleFrame(makeFrame(frameStatus1, []byte{1}))
+		ecu.HandleFrame(makeFrame(0x123, make([]byte, 8)))
+		if onRetry {
+			w.evaluateAt(true, now.Add(commLostProbeInterval))
+			now = now.Add(commLostProbeInterval)
+		}
+		if !ecu.HandleFrame(makeFrame(frameStatus2, []byte{20, 0, 0, 0, 0, 0})) {
+			t.Fatal("valid frame rejected")
+		}
+		ecu.lastFrameTime = now.Add(time.Millisecond)
+		if w.evaluateAt(true, now.Add(commLostProbeWait)) {
+			t.Fatal("valid reply did not prevent E20")
+		}
+		want := 1
+		if onRetry {
+			want = 2
+		}
+		if len(bus.ids()) != want {
+			t.Fatal("reply bypassed cooldown")
+		}
 	}
 }
 
-func TestCommLostProbeReplyAndCooldown(t *testing.T) {
-	ecu, bus := newGatedECU()
-	ecu.powerCmd = powerOn
-	ecu.stateAssertedToECU = true
-	ecu.stateAckedByECU = true
-	ecu.speed = 15
-	now := time.Now()
-	ecu.lastFrameTime = now.Add(-commLostProbeAfter)
-	w := newTestCommLostWatcher(ecu, pastGrace)
-	if w.evaluateAt(true, now) {
-		t.Fatal("probe must not raise E20")
-	}
-	// An accepted frame is sufficient evidence of communication, even without speed.
-	if !ecu.HandleFrame(makeFrame(frameStatus2, []byte{20, 0, 0, 0, 0, 0})) {
-		t.Fatal("Status2 rejected")
-	}
-	ecu.lastFrameTime = now.Add(time.Millisecond)
-	if w.evaluateAt(true, now.Add(commLostProbeWait)) {
-		t.Fatal("reply did not prevent E20")
-	}
-	if len(bus.ids()) != 1 {
-		t.Fatal("reply triggered a probe before cooldown elapsed")
-	}
-	if w.evaluateAt(true, now.Add(commLostProbeInterval)) {
-		t.Fatal("second episode needs a response window")
-	}
-	if len(bus.ids()) != 2 {
-		t.Fatalf("new silence did not receive a probe: %#x", bus.ids())
-	}
-	if !w.evaluateAt(true, now.Add(commLostProbeInterval+commLostProbeWait)) {
-		t.Fatal("unanswered second probe did not raise E20")
-	}
-}
-
-func TestCommLostProbeGates(t *testing.T) {
-	for _, name := range []string{"off", "stopped", "booting", "fresh"} {
-		t.Run(name, func(t *testing.T) {
+func TestCommLostRecovery(t *testing.T) {
+	for _, mode := range []string{"single", "sustained", "probe"} {
+		t.Run(mode, func(t *testing.T) {
 			ecu, bus := newGatedECU()
 			ecu.powerCmd = powerOn
-			ecu.speed = 15
 			now := time.Now()
 			ecu.lastFrameTime = now.Add(-time.Minute)
 			w := newTestCommLostWatcher(ecu, pastGrace)
-			powered := true
-			switch name {
-			case "off":
-				powered = false
-			case "stopped":
-				ecu.speed = 0
-			case "booting":
-				w.powerOnEdge = now.Add(-time.Second)
-			case "fresh":
-				ecu.lastFrameTime = now
+			w.evaluateAt(true, now)
+			w.evaluateAt(true, now.Add(commLostProbeInterval))
+			now = now.Add(commLostProbeInterval + commLostProbeWait)
+			if !w.evaluateAt(true, now) {
+				t.Fatal("outage not raised")
 			}
-			if w.evaluateAt(powered, now) {
-				t.Fatal("ineligible ECU raised E20")
+			now = now.Add(time.Second)
+			ecu.lastFrameTime = now
+			if !w.evaluateAt(true, now) {
+				t.Fatal("single frame cleared fault")
 			}
-			if len(bus.ids()) != 0 {
-				t.Fatal("ineligible ECU received a probe")
+			switch mode {
+			case "single":
+				for i := 1; i <= 20; i++ {
+					if !w.evaluateAt(true, now.Add(time.Duration(i)*commLostTick)) {
+						t.Fatal("isolated frame cleared fault")
+					}
+				}
+				if len(bus.ids()) != 3 {
+					t.Fatalf("recovery probes not bounded: %#x", bus.ids())
+				}
+			case "sustained":
+				ecu.lastFrameTime = now.Add(commLostTick)
+				if !w.evaluateAt(true, ecu.lastFrameTime) {
+					t.Fatal("recovery cleared too early")
+				}
+				ecu.lastFrameTime = now.Add(commLostRecoveryTime)
+				if w.evaluateAt(true, ecu.lastFrameTime) {
+					t.Fatal("sustained recovery not accepted")
+				}
+			case "probe":
+				probeAt := w.probeAt.Add(commLostProbeInterval)
+				if !w.evaluateAt(true, probeAt) {
+					t.Fatal("probe send cleared fault")
+				}
+				ecu.lastFrameTime = probeAt.Add(time.Millisecond)
+				if w.evaluateAt(true, ecu.lastFrameTime) {
+					t.Fatal("confirmed recovery not accepted")
+				}
 			}
 		})
 	}
 }
 
-func TestCommLostProbeRejectsInvalidReplies(t *testing.T) {
+func TestCommLostTransportAndPower(t *testing.T) {
 	ecu, bus := newGatedECU()
 	ecu.powerCmd = powerOn
-	ecu.speed = 15
 	now := time.Now()
-	ecu.lastFrameTime = now.Add(-time.Minute)
+	ecu.lastFrameTime = now
 	w := newTestCommLostWatcher(ecu, pastGrace)
-	w.evaluateAt(true, now)
-	ecu.HandleFrame(makeFrame(frameStatus1, []byte{1}))
-	ecu.HandleFrame(makeFrame(0x123, make([]byte, 8)))
-	if !w.evaluateAt(true, now.Add(commLostProbeWait)) {
-		t.Fatal("invalid traffic masked E20")
+	w.transportCause = func(time.Time) string { return "CAN bus-off" }
+	if !w.evaluateAt(true, now) || w.failureCause != "CAN bus-off" {
+		t.Fatal("transport failure not attributed")
 	}
-	if len(bus.ids()) != 1 {
-		t.Fatal("invalid traffic rearmed probe")
+	if len(bus.ids()) != 0 {
+		t.Fatal("probed failed transport")
 	}
-}
-
-func TestCommLostProbeFailedSendIsBounded(t *testing.T) {
-	ecu, bus := newGatedECU()
-	ecu.powerCmd = powerOn
-	ecu.speed = 15
-	bus.err = errors.New("CAN unavailable")
-	now := time.Now()
+	if w.evaluateAt(false, now.Add(time.Second)) {
+		t.Fatal("power-off did not end monitoring")
+	}
+	if w.evaluateAt(true, now.Add(2*time.Second)) {
+		t.Fatal("power-on grace missing")
+	}
+	w.transportCause = nil
+	afterGrace := now.Add(2*time.Second + commLostPowerOnGrace)
 	ecu.lastFrameTime = now.Add(-time.Minute)
-	w := newTestCommLostWatcher(ecu, pastGrace)
-	w.evaluateAt(true, now)
-	if !w.probePending {
-		t.Fatal("failed send must count as the episode's attempt")
-	}
-	for i := 1; i <= 10; i++ {
-		if !w.evaluateAt(true, now.Add(time.Duration(i)*commLostProbeInterval)) {
-			t.Fatal("failed send masked E20")
-		}
-		if !w.probeAt.Equal(now) {
-			t.Fatal("failed send was retried during the outage")
-		}
-	}
-}
-
-func TestCommLostProbePowerCycle(t *testing.T) {
-	ecu, bus := newGatedECU()
-	ecu.powerCmd = powerOn
-	ecu.speed = 15
-	now := time.Now()
-	ecu.lastFrameTime = now.Add(-time.Minute)
-	w := newTestCommLostWatcher(ecu, pastGrace)
-	w.evaluateAt(true, now)
-	if !w.evaluateAt(true, now.Add(commLostProbeWait)) {
-		t.Fatal("missing initial E20")
-	}
-	if w.evaluateAt(false, now.Add(2*time.Second)) {
-		t.Fatal("power-off did not clear verdict")
-	}
-	poweredOn := now.Add(3 * time.Second)
-	if w.evaluateAt(true, poweredOn) {
-		t.Fatal("power-on did not grant grace")
-	}
-	afterGrace := poweredOn.Add(commLostPowerOnGrace)
 	if w.evaluateAt(true, afterGrace) {
-		t.Fatal("new power cycle needs a probe response window")
+		t.Fatal("must probe after boot grace")
 	}
-	if len(bus.ids()) != 2 {
-		t.Fatalf("power cycle did not rearm probe: %#x", bus.ids())
+	w.evaluateAt(true, afterGrace.Add(commLostProbeInterval))
+	if !w.evaluateAt(true, afterGrace.Add(commLostProbeInterval+commLostProbeWait)) {
+		t.Fatal("missing post-boot E20")
 	}
-	if !w.evaluateAt(true, afterGrace.Add(commLostProbeWait)) {
-		t.Fatal("missing E20 after unanswered probe")
+}
+
+func TestCommLostProbeGates(t *testing.T) {
+	for _, mode := range []string{"off", "booting", "fresh"} {
+		ecu, bus := newGatedECU()
+		ecu.powerCmd = powerOn
+		ecu.speed = 15
+		now := time.Now()
+		ecu.lastFrameTime = now.Add(-time.Minute)
+		w := newTestCommLostWatcher(ecu, pastGrace)
+		if mode == "booting" {
+			w.powerOnEdge = now.Add(-time.Second)
+		}
+		if mode == "fresh" {
+			ecu.lastFrameTime = now
+		}
+		if w.evaluateAt(mode != "off", now) || len(bus.ids()) != 0 {
+			t.Fatalf("gate %s failed", mode)
+		}
 	}
 }
