@@ -86,6 +86,9 @@ interface.
 The service handles `SIGINT` and `SIGTERM`. Loss of ECU communication while the
 controller is powered is reported as the synthetic `E20` fault; investigate the
 CAN path and controller power state before clearing or acting on that report.
+E20 invalidates cached ECU faults and pending diagnostic transitions. After
+communication recovers, ECU faults require a fresh Status2 report and normal
+debouncing; unrelated CAN traffic cannot restore a cached fault.
 
 ## License
 
