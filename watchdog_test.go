@@ -88,11 +88,15 @@ func TestCommLostWatcher_MovingStaleStillRaises(t *testing.T) {
 
 	w := newTestCommLostWatcher(ecu, pastGrace)
 
-	if !w.evaluate(true) {
-		t.Fatal("expected E20 to raise for a stale, powered ECU mid-ride")
+	now := time.Now()
+	if w.evaluateAt(true, now) {
+		t.Fatal("E20 must wait for the status probe response window")
 	}
-	if ids := bus.ids(); len(ids) != 0 {
-		t.Fatalf("a stale ECU sent %#x, want no probe", ids)
+	if ids := bus.ids(); len(ids) != 1 || ids[0] != frameStatusReq {
+		t.Fatalf("a stale ECU sent %#x, want one status probe", ids)
+	}
+	if !w.evaluateAt(true, now.Add(commLostProbeWait)) {
+		t.Fatal("unanswered probe must raise E20")
 	}
 }
 
@@ -149,8 +153,10 @@ func TestCommLostWatcher_NoFlapAtStandstillOnceRaised(t *testing.T) {
 
 	w := newTestCommLostWatcher(ecu, pastGrace)
 
+	now := time.Now()
+	w.evaluateAt(true, now)
 	for i := 0; i < 5; i++ {
-		if !w.evaluate(true) {
+		if !w.evaluateAt(true, now.Add(commLostProbeWait+time.Duration(i)*commLostTick)) {
 			t.Fatalf("tick %d: E20 verdict flapped back to false while still stale", i)
 		}
 	}
@@ -197,7 +203,11 @@ func TestCommLostWatcher_SilentEcuRaisesAfterGrace(t *testing.T) {
 
 	w := newTestCommLostWatcher(ecu, commLostPowerOnGrace+100*time.Millisecond)
 
-	if !w.evaluate(true) {
-		t.Fatal("an ECU that never sent a frame must raise E20 once the grace window expires")
+	now := time.Now()
+	if w.evaluateAt(true, now) {
+		t.Fatal("an ECU past boot grace must receive a probe before E20")
+	}
+	if !w.evaluateAt(true, now.Add(commLostProbeWait)) {
+		t.Fatal("an ECU that never replies must raise E20 after the probe window")
 	}
 }

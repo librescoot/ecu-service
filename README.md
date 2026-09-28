@@ -86,6 +86,14 @@ interface.
 The service handles `SIGINT` and `SIGTERM`. Loss of ECU communication while the
 controller is powered is reported as the synthetic `E20` fault; investigate the
 CAN path and controller power state before clearing or acting on that report.
+With nonzero last-reported speed, the watchdog sends one status request after
+one second of silence, outside the eight-second power-on grace period. Requests
+are at least three seconds apart and never repeat during an uninterrupted outage.
+E20 requires more than three seconds of silence and at least 1.5 seconds since
+the probe; a delayed watchdog tick or request cooldown can extend that deadline.
+Only a valid received ECU frame establishes communication, not sending a probe.
+No status probes are sent while unpowered or with zero last-reported speed.
+
 E20 invalidates cached ECU faults and pending diagnostic transitions. After
 communication recovers, ECU faults require a fresh Status2 report and normal
 debouncing; unrelated CAN traffic cannot restore a cached fault.

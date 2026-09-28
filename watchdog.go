@@ -8,8 +8,11 @@ import (
 )
 
 const (
-	commLostTick       = 500 * time.Millisecond
-	commLostRaiseAfter = 3 * time.Second
+	commLostTick          = 500 * time.Millisecond
+	commLostRaiseAfter    = 3 * time.Second
+	commLostProbeAfter    = time.Second
+	commLostProbeWait     = 1500 * time.Millisecond
+	commLostProbeInterval = 3 * time.Second
 	// ecuColdStartWorst is the longest measured delay between engine_power going
 	// on and the controller's first CAN frame. It is not one number: it varies by
 	// controller by a factor of four, measured with `lsc engine on`, stationary,
@@ -56,8 +59,9 @@ const (
 // so it can be counted in the field without being shown to riders.
 //
 // The cost is accepted knowingly: a bus that dies while the vehicle is parked
-// and powered will not raise E20 until the vehicle moves. Frame staleness while
-// moving is unambiguous and still raises immediately.
+// and powered will not raise E20 until the vehicle moves. With a non-zero cached
+// speed, one status probe distinguishes a quiet controller from an unresponsive
+// one. A probe never refreshes liveness; only received frames do.
 //
 // Measured stationary on two controllers, both healthy. The rate differs by
 // 20x, the gap this check depends on does not:
@@ -73,6 +77,9 @@ type CommLostWatcher struct {
 	published      bool
 	prevEcuPowered bool
 	powerOnEdge    time.Time
+	probeAt        time.Time
+	probeFrame     time.Time
+	probePending   bool
 	// silentAtRest edges the at-rest log line. The check runs at 2Hz, and an ECU
 	// that has gone quiet stays quiet, so logging the condition rather than the
 	// transition would fill the journal for as long as it lasts.
@@ -110,10 +117,8 @@ func (w *CommLostWatcher) check() {
 	// ECU is expected to talk iff vehicle-service commanded engine-power ON and
 	// the battery supplies the 48V rail (main-power ON). Both must hold.
 	ecuPowered := fields["engine-power"] == "on" && fields["main-power"] == "on"
-	// This is the only place that reads the power fields, so it also tells the
-	// ECU whether it may transmit at all. Without that, the CAN reconnect loop
-	// and the KERS setters would keep talking to an unpowered ECU, and the
-	// unacknowledged frames eventually latch the controller bus-off.
+	// Refresh the transmit gate alongside the power-field subscription.
+	// Unacknowledged transmissions to an unpowered ECU can cause bus-off.
 	w.ecu.SetPowered(ecuPowered)
 	// Re-assert the commanded KERS and boost state until the controller answers.
 	// The Control frame is answered with 0x7E4 and no-ops once acknowledged.
@@ -145,7 +150,13 @@ func (w *CommLostWatcher) check() {
 // raised and tracks the power-on grace edge along the way. Split out from
 // check() so the decision itself can be tested without a live IPC connection.
 func (w *CommLostWatcher) evaluate(ecuPowered bool) bool {
-	now := time.Now()
+	return w.evaluateAt(ecuPowered, time.Now())
+}
+
+func (w *CommLostWatcher) evaluateAt(ecuPowered bool, now time.Time) bool {
+	if ecuPowered != w.prevEcuPowered {
+		w.probePending = false
+	}
 	if ecuPowered && !w.prevEcuPowered {
 		w.powerOnEdge = now
 	}
@@ -155,7 +166,11 @@ func (w *CommLostWatcher) evaluate(ecuPowered bool) bool {
 	// Measure staleness from the more recent of {last frame, power-on edge}, so a
 	// frame timestamp carried over from a previous power cycle doesn't trip the
 	// check the instant the grace window expires.
-	frameAge := w.ecu.TimeSinceLastFrame()
+	lastFrame := w.ecu.LastFrameTime()
+	frameAge := now.Sub(lastFrame)
+	if lastFrame.After(w.probeFrame) {
+		w.probePending = false
+	}
 	if !w.powerOnEdge.IsZero() {
 		if since := now.Sub(w.powerOnEdge); since < frameAge {
 			frameAge = since
@@ -169,7 +184,20 @@ func (w *CommLostWatcher) evaluate(ecuPowered bool) bool {
 	moving := w.ecu.Speed() != 0
 	w.noteSilentAtRest(silent && !moving, frameAge)
 
-	return silent && moving
+	if !ecuPowered || inGrace || !moving {
+		return false
+	}
+	// One attempt per uninterrupted silence, including failed sends. Retain the
+	// cooldown across replies and power edges to bound request-driven traffic.
+	if !w.probePending && frameAge >= commLostProbeAfter &&
+		(w.probeAt.IsZero() || now.Sub(w.probeAt) >= commLostProbeInterval) {
+		w.probeAt = now
+		w.probeFrame = lastFrame
+		w.probePending = true
+		w.log.Info("ECU silent for %.1fs at non-zero speed, requesting status", frameAge.Seconds())
+		w.ecu.RequestStatus()
+	}
+	return silent && w.probePending && now.Sub(w.probeAt) >= commLostProbeWait
 }
 
 // noteSilentAtRest logs the suppressed case on its edges. This is the only

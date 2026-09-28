@@ -933,9 +933,13 @@ func (b *ECU) IsStale() bool {
 }
 
 func (b *ECU) TimeSinceLastFrame() time.Duration {
+	return time.Since(b.LastFrameTime())
+}
+
+func (b *ECU) LastFrameTime() time.Time {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return time.Since(b.lastFrameTime)
+	return b.lastFrameTime
 }
 
 // The accessors below take the read lock so callers cannot race CAN updates.
