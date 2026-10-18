@@ -585,11 +585,13 @@ type fakeBus struct {
 	err  error
 }
 
-func (f *fakeBus) Publish(frame can.Frame) error {
-	if f.err != nil {
-		return f.err
+// Decoder tests use immediate in-memory completions. Transport tests exercise
+// asynchronous completion and send-time authorization against a blocked socket.
+func (f *fakeBus) Submit(r txRequest) error {
+	if f.err == nil {
+		f.sent = append(f.sent, r.frames...)
 	}
-	f.sent = append(f.sent, frame)
+	r.done <- txResult{err: f.err}
 	return nil
 }
 

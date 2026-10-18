@@ -35,6 +35,29 @@ Fault presence is stored in `engine-ecu:fault`; changes are also appended to
 `battery:0`, and `battery:1` to determine KERS eligibility. Battery state is
 considered active only when its `state` field is `active`.
 
+### Fresh motion and asynchronous CAN I/O
+
+The additive `engine-ecu:motion` channel publishes complete direct-value JSON
+observations on every motion frame, including unchanged values. See the
+[versioned contract and isolated integration test](MOTION_IPC.md). The existing
+hash/change-notification interface remains unchanged.
+
+One timestamp-aware CAN receive pump feeds a 64-entry ordered dispatcher queue.
+Legacy Redis publication cannot block physical reception; an overflow discards
+queued work and invalidates motion continuity. Receive timestamps, rather than
+callback time, establish controller liveness. Expired buffered traffic cannot
+refresh it.
+
+One asynchronous TX worker shares that same socket. Control code submits bounded
+batches without performing socket writes under the ECU state mutex or in a receive
+callback. Batches expire after 100 ms; power/connection generation and current
+transmit permission are checked before writes. Power-off/reconnect invalidate
+pending commands. Queue-full and write failures leave assertions eligible for
+reconciliation; startup gear sequences retry after incomplete transmission.
+Sent flags update only after successful batch completion. A completed socket
+write is distinct from the controller-reported KERS/boost/configuration values.
+Other services' CAN access is unchanged.
+
 ### Controller power-on behavior
 
 The service does not immediately assert KERS and boost state when ECU power is

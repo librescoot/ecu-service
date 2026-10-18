@@ -11,6 +11,7 @@ import (
 
 	"github.com/brutella/can"
 	ipc "github.com/librescoot/redis-ipc"
+	"github.com/redis/go-redis/v9"
 )
 
 const redisHealthInterval = 30 * time.Second
@@ -22,18 +23,24 @@ const (
 )
 
 type App struct {
-	opts              Options
-	log               *Logger
-	ipc               *ipc.Client
-	ecu               *ECU
-	battery           *BatteryTracker
-	kers              *KERSController
-	diag              *Diagnostics
-	ipcTx             *IPCTx
-	ipcRx             *IPCRx
-	commLost          *CommLostWatcher
-	canLink           *CanLinkWatcher
-	socketUnavailable atomic.Bool
+	opts                  Options
+	log                   *Logger
+	ipc                   *ipc.Client
+	ecu                   *ECU
+	battery               *BatteryTracker
+	kers                  *KERSController
+	diag                  *Diagnostics
+	ipcTx                 *IPCTx
+	ipcRx                 *IPCRx
+	commLost              *CommLostWatcher
+	canLink               *CanLinkWatcher
+	socketUnavailable     atomic.Bool
+	motionWG              sync.WaitGroup
+	canWG                 sync.WaitGroup
+	motion                *motionFeed
+	motionInputSource     string
+	motionOutputSource    string
+	motionPowerGeneration uint64
 
 	// Serialize CAN fault publication with watchdog transitions.
 	faultMu        sync.Mutex
@@ -41,7 +48,7 @@ type App struct {
 
 	// busMu guards bus, which the CAN reconnect loop swaps out on resume.
 	busMu sync.Mutex
-	bus   *can.Bus
+	bus   *canTransport
 
 	// Change tracking for publish-on-change fields.
 	lastThrottle           bool
@@ -96,14 +103,16 @@ func NewApp(ctx context.Context, opts Options) (*App, error) {
 
 	// Open CAN only after Redis has accepted the restored (or cleared)
 	// odometer state, so constructor failures do not leak the bus resource.
-	bus, err := can.NewBusForInterfaceWithName(opts.CANDevice)
+	bus, err := openCANTransport(opts.CANDevice)
 	if err != nil {
 		client.Close()
 		return nil, fmt.Errorf("CAN bus open: %w", err)
 	}
 	a.bus = bus
+	a.motion = newMotionFeed()
 
 	a.ecu = newECU(bus, log, opts.GearRatioValues)
+	a.motion.allowed = func(at time.Time) bool { allowed, _ := a.ecu.motionState(at); return allowed }
 	a.battery = &BatteryTracker{}
 
 	// Publish a zero-valued config so any stale config:* fields left behind
@@ -222,9 +231,17 @@ func (a *App) Run(ctx context.Context) error {
 	// Subscribe to Redis channels and sync initial state.
 	a.ipcRx.Start()
 
-	// Drive the CAN bus with automatic reconnection (the SocketCAN socket goes
-	// stale across MDB suspend/resume, so ConnectAndPublish returns and we must
-	// rebuild the bus).
+	// One receive pump and one asynchronous transmitter share the same socket.
+	motionRedis := redis.NewClient(motionRedisOptions(a.ipc.Raw().Options()))
+	a.motionWG.Add(1)
+	go func() {
+		defer a.motionWG.Done()
+		defer motionRedis.Close()
+		a.motion.run(ctx, func(callCtx context.Context, payload []byte) error {
+			return motionRedis.Publish(callCtx, motionEvidenceChannel, payload).Err()
+		})
+	}()
+	a.canWG.Add(1)
 	go a.runCANBusLoop(ctx)
 
 	// Watch for ECU comm loss (raises E20).
@@ -241,25 +258,31 @@ func (a *App) Run(ctx context.Context) error {
 	<-ctx.Done()
 	a.log.Info("Shutting down")
 
-	// Unblock ConnectAndPublish so the loop can observe ctx cancellation.
+	// Close the socket before joining workers.
 	a.busMu.Lock()
 	if a.bus != nil {
-		a.bus.Disconnect()
+		a.bus.Close()
 	}
 	a.busMu.Unlock()
 
+	a.canWG.Wait()
+	a.motionWG.Wait()
 	a.ipc.Close()
 	return nil
 }
 
-// runCANBusLoop runs ConnectAndPublish in a loop, rebuilding the bus whenever
-// it returns. ConnectAndPublish blocks until the socket dies (e.g. after
-// suspend/resume); on return we wait out a backoff, create a fresh bus,
-// resubscribe the frame handler, and point the ECU at the new socket.
+// A reconnect invalidates pending commands and starts a new motion generation.
 func (a *App) runCANBusLoop(ctx context.Context) {
+	defer a.canWG.Done()
 	a.busMu.Lock()
 	bus := a.bus
 	a.busMu.Unlock()
+	defer func() {
+		a.ecu.UpdateBus(nil)
+		if bus != nil {
+			_ = bus.Close()
+		}
+	}()
 
 	backoff := canReconnectInitialBackoff
 	for {
@@ -269,11 +292,11 @@ func (a *App) runCANBusLoop(ctx context.Context) {
 		default:
 		}
 
-		bus.Subscribe((*appHandler)(a))
-
-		if err := bus.ConnectAndPublish(); err != nil {
+		if err := bus.Run(ctx, a.handleReceived); err != nil && ctx.Err() == nil {
 			a.log.Error("CAN bus error: %v", err)
 		}
+		a.ecu.UpdateBus(nil)
+		a.motion.offer(newMotionSource().invalid("transport-error"))
 		a.socketUnavailable.Store(true)
 
 		select {
@@ -282,7 +305,7 @@ func (a *App) runCANBusLoop(ctx context.Context) {
 		case <-time.After(backoff):
 		}
 
-		newBus, err := can.NewBusForInterfaceWithName(a.opts.CANDevice)
+		newBus, err := openCANTransport(a.opts.CANDevice)
 		if err != nil {
 			a.log.Error("Failed to recreate CAN bus on %s: %v", a.opts.CANDevice, err)
 			backoff = min(backoff*2, canReconnectMaxBackoff)
@@ -330,6 +353,14 @@ func (a *App) runFrameSummary(ctx context.Context) {
 }
 
 func (a *App) logFrameSummary() {
+	a.busMu.Lock()
+	bus := a.bus
+	a.busMu.Unlock()
+	if bus != nil {
+		if dropped := bus.drops.Swap(0); dropped != 0 {
+			a.log.Warn("CAN receive queue discarded %d frames", dropped)
+		}
+	}
 	a.frameMu.Lock()
 	counts := a.frameCounts
 	a.frameCounts = make(map[uint32]int, len(counts))
@@ -358,7 +389,28 @@ func (a *App) logFrameSummary() {
 }
 
 func (h *appHandler) Handle(frame can.Frame) {
-	a := (*App)(h)
+	(*App)(h).handleFrameAt(frame, time.Now())
+}
+
+func (a *App) handleReceived(e receivedFrame) {
+	if e.motion != nil {
+		allowed, generation := a.ecu.motionState(e.at)
+		if a.motionInputSource != e.motion.Source || a.motionPowerGeneration != generation {
+			a.motionInputSource, a.motionPowerGeneration = e.motion.Source, generation
+			a.motionOutputSource = newMotionSource().source
+		}
+		e.motion.Source = a.motionOutputSource
+		if e.motion.Valid && !allowed {
+			e.motion = invalidMotion(e.motion, "powered-off")
+		}
+		a.motion.offer(e.motion)
+	}
+	if !e.at.IsZero() {
+		a.handleFrameAt(e.frame, e.at)
+	}
+}
+
+func (a *App) handleFrameAt(frame can.Frame, received time.Time) {
 	a.log.DebugCAN("RX", frame.ID, frame.Data, frame.Length)
 
 	// The traffic summary intentionally counts raw bus traffic, including IDs
@@ -370,7 +422,7 @@ func (h *appHandler) Handle(frame can.Frame) {
 	a.frameCounts[frame.ID]++
 	a.frameMu.Unlock()
 
-	if !a.ecu.HandleFrame(frame) {
+	if !a.ecu.HandleFrameAt(frame, received) {
 		return
 	}
 	a.socketUnavailable.Store(false)

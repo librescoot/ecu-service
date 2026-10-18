@@ -115,9 +115,10 @@ type ConfigReport struct {
 type ECU struct {
 	mu sync.RWMutex
 
-	// CAN bus for sending control frames. An interface rather than *can.Bus so
-	// tests can capture what would go on the wire.
-	bus canPublisher
+	bus             canTransmitter
+	pendingTX       []*pendingTX
+	txGeneration    uint64
+	controlRevision uint64
 
 	log *Logger
 
@@ -222,12 +223,7 @@ type ECU struct {
 	speedBuf speedBuffer
 }
 
-// canPublisher is the part of *can.Bus the ECU uses.
-type canPublisher interface {
-	Publish(can.Frame) error
-}
-
-func newECU(bus *can.Bus, log *Logger, gearRatioValues []uint8) *ECU {
+func newECU(bus canTransmitter, log *Logger, gearRatioValues []uint8) *ECU {
 	return &ECU{
 		bus:             bus,
 		log:             log,
@@ -289,8 +285,17 @@ const ecuSilenceLogAfter = 2 * time.Second
 const ecuAssertHoldAfterPowerOn = 1500 * time.Millisecond
 
 func (b *ECU) HandleFrame(frame can.Frame) bool {
+	return b.HandleFrameAt(frame, time.Now())
+}
+
+func (b *ECU) HandleFrameAt(frame can.Frame, received time.Time) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.drainTXLocked()
+	age := time.Since(received)
+	if received.IsZero() || age < 0 || age > staleTimeout || (b.sawFrame && received.Before(b.lastFrameTime)) || (b.powerCmd == powerOn && received.Before(b.powerOnAt)) || frame.Length > 8 {
+		return false
+	}
 
 	minimum, recognized := frameMinimumLength(frame.ID)
 	if !recognized {
@@ -303,7 +308,7 @@ func (b *ECU) HandleFrame(frame can.Frame) bool {
 		return false
 	}
 
-	now := time.Now()
+	now := received
 	gap := now.Sub(b.lastFrameTime)
 	if gap > ecuSilenceLogAfter {
 		b.log.Info("ECU frames resumed after %.1fs of silence", gap.Seconds())
@@ -371,28 +376,21 @@ func (b *ECU) handleStatus1(frame can.Frame) {
 
 	b.voltage = int(binary.BigEndian.Uint16(frame.Data[0:2])) * 10
 	b.current = int(int16(binary.BigEndian.Uint16(frame.Data[2:4]))) * 10
-	b.rpm = binary.BigEndian.Uint16(frame.Data[4:6])
-	b.rawSpeed = uint16(frame.Data[6])
+	rpm, rawSpeed, throttle := decodeMotionValues(frame)
+	b.rpm, b.rawSpeed, b.throttleOn = rpm, uint16(rawSpeed), throttle
 	b.speed = b.calibratedSpeed(b.rawSpeed)
-	b.throttleOn = frame.Data[7]&0x01 != 0
 	b.brakeOn = frame.Data[7]&0x02 != 0
 
 	b.updatePower()
 
-	// Send configured gear ratios once per power-up, detected by the first
-	// Status1 frame. Built inline rather than via SetGear: HandleFrame
-	// already holds b.mu here, and SetGear takes it too.
-	if !b.gearsSentOnPower && len(b.gearRatioValues) > 0 {
-		b.gearsSentOnPower = true
+	if !b.gearsSentOnPower && !b.pendingLocked("startup gears") && len(b.gearRatioValues) > 0 {
+		frames := make([]can.Frame, len(b.gearRatioValues))
 		for i, ratio := range b.gearRatioValues {
-			gear := uint8(i + 1)
-			gearFrame := can.Frame{ID: frameGearControl, Length: 1}
-			gearFrame.Data[0] = ratio
-			if err := b.publish(gearFrame, "gear"); err != nil {
-				b.log.Error("Failed to send gear %d on power-up: %v", gear, err)
-			} else {
-				b.log.Debug("Sent gear %d (ratio: %d) on ECU power-up", gear, ratio)
-			}
+			frames[i] = can.Frame{ID: frameGearControl, Length: 1}
+			frames[i].Data[0] = ratio
+		}
+		if err := b.submitLocked(frames, "startup gears", true); err != nil {
+			b.log.Debug("Startup gears not queued: %v", err)
 		}
 	}
 }
@@ -697,7 +695,7 @@ func (b *ECU) mayTransmitLocked() bool {
 	}
 }
 
-// publish sends a frame only when the ECU can be expected to acknowledge it.
+// publish queues a frame only when the ECU can be expected to acknowledge it.
 // Callers hold b.mu.
 func (b *ECU) publish(frame can.Frame, what string) error {
 	if b.bus == nil {
@@ -707,7 +705,7 @@ func (b *ECU) publish(frame can.Frame, what string) error {
 		b.log.Debug("ECU power %s, dropping %s frame", b.powerCmd, what)
 		return nil
 	}
-	return b.bus.Publish(frame)
+	return b.submitLocked([]can.Frame{frame}, what, false)
 }
 
 // SetParked records whether vehicle-service currently has the scooter parked.
@@ -716,6 +714,9 @@ func (b *ECU) publish(frame can.Frame, what string) error {
 func (b *ECU) SetParked(parked bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.parked != parked {
+		b.changedControlLocked()
+	}
 	b.parked = parked
 }
 
@@ -733,6 +734,8 @@ func (b *ECU) SetPowered(powered bool) {
 	if cmd == b.powerCmd {
 		return
 	}
+	b.txGeneration++
+	b.pendingTX = nil
 	b.powerCmd = cmd
 	b.log.Info("ECU power: %s", cmd)
 
@@ -753,8 +756,8 @@ func (b *ECU) SetPowered(powered bool) {
 	b.powerOnAt = time.Now()
 }
 
-// applyCommandedStateLocked puts the commanded KERS and boost state on the wire
-// if the controller has not already acknowledged it. Callers hold b.mu.
+// applyCommandedStateLocked queues a KERS/boost assertion when needed.
+// Callers hold b.mu; successful TX completion records the assertion.
 //
 // heard says the caller knows the controller is listening right now, because it
 // just sent us a frame. Without it the assertion is a blind probe: the Control
@@ -770,7 +773,8 @@ func (b *ECU) SetPowered(powered bool) {
 // distinguishes "it heard us" from "it booted on its own", so the arriving
 // frame re-asserts rather than assuming.
 func (b *ECU) applyCommandedStateLocked(heard bool) {
-	if b.stateAckedByECU || !b.mayTransmitLocked() {
+	b.drainTXLocked()
+	if b.stateAckedByECU || b.pendingLocked("control") || !b.mayTransmitLocked() {
 		return
 	}
 	if !heard {
@@ -784,9 +788,7 @@ func (b *ECU) applyCommandedStateLocked(heard bool) {
 	// information, the first attempt and the one the controller heard, under
 	// half a dozen identical lines on every power-on.
 	repeat := b.stateAssertedToECU && !heard
-	b.stateAssertedToECU = true
-	b.stateAckedByECU = heard
-	b.sendKersStateLocked(repeat)
+	b.queueKersStateLocked(repeat, heard)
 }
 
 // ApplyCommandedState re-asserts the commanded state if the controller has not
@@ -798,8 +800,8 @@ func (b *ECU) ApplyCommandedState() {
 	b.applyCommandedStateLocked(false)
 }
 
-// sendKersStateLocked emits the frames that carry the currently commanded KERS
-// state. Callers hold b.mu.
+// sendKersStateLocked queues the frames carrying the commanded KERS state.
+// Callers hold b.mu.
 //
 // The EBS Set frame goes out unconditionally, including when regen is off. It
 // carries the regen voltage and current caps, which are configuration: whether
@@ -812,11 +814,13 @@ func (b *ECU) ApplyCommandedState() {
 // Sending them on every state assertion is idempotent, costs one frame, and
 // keeps the two in step from the first assertion after power-on.
 //
-// The transmit gate is checked here rather than left to publish() so the log
-// line means the frames went out. Reached with the gate shut, publish() drops
-// both frames and says so only at Debug, which left an Info line claiming an
-// assertion that never made it onto the bus.
+// Enqueueing is distinct from transmission; the worker rechecks permission
+// before each socket write and reports batch completion separately.
 func (b *ECU) sendKersStateLocked(quiet bool) {
+	b.queueKersStateLocked(quiet, false)
+}
+
+func (b *ECU) queueKersStateLocked(quiet, heard bool) {
 	if b.bus == nil || !b.mayTransmitLocked() {
 		b.log.Debug("ECU power %s, not asserting KERS state", b.powerCmd)
 		return
@@ -827,24 +831,19 @@ func (b *ECU) sendKersStateLocked(quiet bool) {
 		announce = b.log.Debug
 	}
 	effectiveKers := b.kersActive && !b.parked
-	announce("KERS -> ECU: active=%v voltage=%dmV current=%dmA boost=%v",
+	announce("Queue KERS -> ECU: active=%v voltage=%dmV current=%dmA boost=%v",
 		effectiveKers, b.kersVoltage, b.kersCurrent, b.boostEnabled)
 
 	ebs := can.Frame{ID: frameEBSSet, Length: 4}
 	binary.BigEndian.PutUint16(ebs.Data[0:2], b.kersVoltage/10)
 	binary.BigEndian.PutUint16(ebs.Data[2:4], b.kersCurrent/10)
-	b.log.DebugCAN("TX", ebs.ID, ebs.Data, ebs.Length)
-	if err := b.publish(ebs, "EBS Set"); err != nil {
-		b.log.Error("Failed to send EBS Set frame: %v", err)
-	}
 
 	ctrl := can.Frame{ID: frameControl, Length: 1}
 	ctrl.Data[0] = 0x01 | // gear mode always enabled (bit 0)
 		boolBit(b.boostEnabled, 1) |
 		boolBit(effectiveKers, 2)
-	b.log.DebugCAN("TX", ctrl.ID, ctrl.Data, ctrl.Length)
-	if err := b.publish(ctrl, "Control"); err != nil {
-		b.log.Error("Failed to send Control frame: %v", err)
+	if err := b.submitLocked([]can.Frame{ebs, ctrl}, "control", heard); err != nil {
+		b.log.Debug("Control assertion not queued: %v", err)
 	}
 }
 
@@ -854,6 +853,7 @@ func (b *ECU) SetKersEnabled(enabled bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	b.changedControlLocked()
 	b.kersActive = enabled
 	b.sendKersStateLocked(false)
 }
@@ -867,6 +867,7 @@ func (b *ECU) SetBoostEnabled(enabled bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	b.changedControlLocked()
 	b.boostEnabled = enabled
 	b.log.Info("Boost -> %v", enabled)
 	b.sendKersStateLocked(false)
@@ -920,9 +921,13 @@ func (b *ECU) RequestStatus() {
 }
 
 // UpdateBus swaps in a reconnected socket without fabricating frame freshness.
-func (b *ECU) UpdateBus(bus *can.Bus) {
+func (b *ECU) UpdateBus(bus canTransmitter) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.txGeneration++
+	b.pendingTX = nil
+	b.changedControlLocked()
+	b.gearsSentOnPower = false
 	b.bus = bus
 }
 
