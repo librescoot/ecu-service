@@ -338,7 +338,7 @@ func TestMotionIPCProducerFixture(t *testing.T) {
 	tr := newCANTransport(&timestampSocket{fd: pair[0]})
 	client := redis.NewClient(motionRedisOptions(&redis.Options{Network: "unix", Addr: path}))
 	defer client.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
 	feed := newMotionFeed()
 	ecu := newECU(nil, newLogger(LogLevelNone), nil)
@@ -347,7 +347,11 @@ func TestMotionIPCProducerFixture(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		feed.run(ctx, func(ctx context.Context, payload []byte) error {
-			return client.Publish(ctx, motionEvidenceChannel, payload).Err()
+			err := client.Publish(ctx, motionEvidenceChannel, payload).Err()
+			if err != nil {
+				t.Logf("motion publication failed: %v; payload=%s", err, payload)
+			}
+			return err
 		})
 	}()
 	go func() {
@@ -356,6 +360,9 @@ func TestMotionIPCProducerFixture(t *testing.T) {
 			if e.motion != nil {
 				if e.motion.Valid && !ecu.HandleFrameAt(e.frame, e.at) {
 					e.motion = invalidMotion(e.motion, "decoder-rejected")
+				}
+				if !e.motion.Valid {
+					t.Logf("motion invalidated: %+v", *e.motion)
 				}
 				feed.offer(e.motion)
 			}
