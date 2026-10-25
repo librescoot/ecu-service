@@ -498,6 +498,7 @@ func (a *App) onFrame(genuineStatus3 bool) {
 		OdometerValid:        a.odometerValid,
 		KersActive:           a.ecu.KersECUEnabled(), // publish ECU-reported KERS state (matches v1)
 		BoostEnabled:         a.ecu.BoostEnabled(),
+		TimedBoost:           a.ecu.TimedBoost(),
 		KersReasonOff:        string(kersReason),
 		AcceptedRegenVoltage: a.ecu.AcceptedRegenVoltage(),
 		AcceptedRegenCurrent: a.ecu.AcceptedRegenCurrent(),

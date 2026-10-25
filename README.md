@@ -58,6 +58,14 @@ Sent flags update only after successful batch completion. A completed socket
 write is distinct from the controller-reported KERS/boost/configuration values.
 Other services' CAN access is unchanged.
 
+### Timed boost telemetry
+
+Compatible TUNU native guards expose accepted/active state, pack eligibility,
+remaining allowance, cooldown and inhibition reasons separately from the legacy
+boost acknowledgement. The `engine-ecu:boost` JSON key/channel has a 500 ms
+observation-based expiry. See the [versioned contract](TIMED_BOOST.md). Stock
+control IDs and the existing `engine-ecu` hash fields remain unchanged.
+
 ### Controller power-on behavior
 
 The service does not immediately assert KERS and boost state when ECU power is

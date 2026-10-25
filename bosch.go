@@ -137,10 +137,12 @@ type ECU struct {
 	faultCode            uint32
 	odometer             uint32 // meters, calibrated
 	odometerValid        bool
-	kersECU              bool   // KERS state as reported by ECU (Status4)
-	kersActive           bool   // KERS state as commanded by service
-	boostEnabled         bool   // commanded boost (drives the control frame)
-	boostActive          bool   // boost state the ECU acknowledges in Status4 (paired-bit decode)
+	kersECU              bool // KERS state as reported by ECU (Status4)
+	kersActive           bool // KERS state as commanded by service
+	boostEnabled         bool // commanded boost (drives the control frame)
+	boostActive          bool // boost state the ECU acknowledges in Status4 (paired-bit decode)
+	timedBoost           TimedBoostStatus
+	timedBoostIdentity   bool
 	kersCurrent          uint16 // KERS regen current in mA (EBS Set frame)
 	kersVoltage          uint16 // KERS regen voltage in mV (EBS Set frame)
 	acceptedRegenVoltage int    // EBS regen voltage cap the ECU accepted, in mV (EBS Status frame echo)
@@ -470,6 +472,7 @@ func (b *ECU) handleStatus4(frame can.Frame) {
 	} else if byte0&0x40 != 0 { // bit 6: KERS/EBS enabled
 		b.kersECU = true
 	}
+	b.updateTimedBoostLocked(frame)
 }
 
 func (b *ECU) handleGear(frame can.Frame) {
@@ -547,6 +550,10 @@ func (b *ECU) handleStatus5(frame can.Frame) {
 	b.motorMaxSpeedKMH = motorMaxSpeedKMH
 	b.swBaseVersion = swBaseVersion
 	b.swAppVersion = swAppVersion
+	b.timedBoostIdentity = swBaseVersion == 0x10 && swAppVersion >= 2
+	if !b.timedBoostIdentity {
+		b.timedBoost = TimedBoostStatus{}
+	}
 
 	if changed {
 		b.log.Info("ECU firmware 0x%08X %dkW / %dkm/h / base=%s / app=%s",
@@ -737,6 +744,8 @@ func (b *ECU) SetPowered(powered bool) {
 	b.txGeneration++
 	b.pendingTX = nil
 	b.powerCmd = cmd
+	b.timedBoost = TimedBoostStatus{}
+	b.timedBoostIdentity = false
 	b.log.Info("ECU power: %s", cmd)
 
 	if cmd == powerOff {

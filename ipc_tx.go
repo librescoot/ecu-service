@@ -41,6 +41,7 @@ type Status struct {
 	OdometerValid        bool
 	KersActive           bool
 	BoostEnabled         bool
+	TimedBoost           TimedBoostStatus
 	KersReasonOff        string
 	AcceptedRegenVoltage int    // mV, EBS regen voltage cap the ECU accepted
 	AcceptedRegenCurrent int    // mA, EBS regen current limit the ECU accepted
@@ -195,6 +196,12 @@ func (tx *IPCTx) SendStatus(s Status) error {
 	}
 	if len(fields) != 0 {
 		if _, err := tx.raw.HSet(tx.ctx, ecuHashKey, fields).Result(); err != nil {
+			return err
+		}
+	}
+
+	if first || s.TimedBoost != l.TimedBoost {
+		if err := tx.sendTimedBoost(s.TimedBoost); err != nil {
 			return err
 		}
 	}
