@@ -211,6 +211,7 @@ type ECU struct {
 	startupPhaseCurrentMA uint32 // Startup phase current in mA
 
 	// Energy accounting.
+	energyRestored      bool
 	energyConsumed      uint64  // mWh consumed
 	energyRecovered     uint64  // mWh recovered (regen)
 	energyConsumedFrac  float64 // sub-mWh remainder carried across frames
@@ -1152,4 +1153,23 @@ func boolBit(v bool, shift uint) byte {
 		return 1 << shift
 	}
 	return 0
+}
+
+// energyTotals snapshots both counters and their restoration state together.
+func (b *ECU) energyTotals() (uint64, uint64, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.energyConsumed, b.energyRecovered, b.energyRestored
+}
+
+func (b *ECU) restoreEnergyTotals(consumed, recovered uint64) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.energyRestored {
+		return false
+	}
+	b.energyConsumed += consumed
+	b.energyRecovered += recovered
+	b.energyRestored = true
+	return true
 }

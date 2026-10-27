@@ -97,10 +97,6 @@ func NewApp(ctx context.Context, opts Options) (*App, error) {
 
 	a.ipcTx = newIPCTx(ctx, client, log)
 	a.ecu = newECU(nil, log, opts.GearRatioValues)
-	if err := a.loadEnergyTotals(); err != nil {
-		client.Close()
-		return nil, err
-	}
 	if err := a.loadCachedOdometer(); err != nil {
 		client.Close()
 		return nil, err
@@ -232,6 +228,12 @@ func (a *App) Run(ctx context.Context) error {
 	// field is the only artifact we get, and without this line it cannot be tied
 	// to a build without guessing from image tags.
 	a.log.Info("ecu-service %s starting", version)
+
+	a.canWG.Add(1)
+	go func() {
+		defer a.canWG.Done()
+		a.restoreEnergyTotals(ctx)
+	}()
 
 	// Subscribe to Redis channels and sync initial state.
 	a.ipcRx.Start()
@@ -485,6 +487,7 @@ func (a *App) onFrame(genuineStatus3 bool) {
 		notifyOdometer = a.acceptStatus3Odometer()
 	}
 
+	consumed, recovered, energyRestored := a.ecu.energyTotals()
 	s := Status{
 		Voltage:              a.ecu.Voltage(),
 		Current:              a.ecu.Current(),
@@ -495,8 +498,9 @@ func (a *App) onFrame(genuineStatus3 bool) {
 		ThrottleOn:           a.ecu.ThrottleOn(),
 		BrakeOn:              a.ecu.BrakeOn(),
 		Power:                a.ecu.Power(),
-		EnergyConsumed:       a.ecu.EnergyConsumed(),
-		EnergyRecovered:      a.ecu.EnergyRecovered(),
+		EnergyConsumed:       consumed,
+		EnergyRecovered:      recovered,
+		EnergyUnrestored:     !energyRestored,
 		Temperature:          a.ecu.Temperature(),
 		FaultCode:            a.ecu.FaultCode(),
 		Odometer:             a.odometer,

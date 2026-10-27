@@ -27,11 +27,14 @@ configuration when the ECU reports it.
 
 The `energy:consumed` and `energy:recovered` fields are cumulative integer
 mWh totals integrated from motor voltage and current. At process startup the
-service restores each existing total from Redis before accepting CAN frames; a
-missing field starts at zero. Invalid totals or Redis read errors prevent startup
-rather than overwriting retained data. Sub-mWh remainders and energy while the
-service is stopped are not retained. Continuity across a Redis restart or power
-loss depends on Redis persistence; the service does not checkpoint energy to disk.
+service restores existing totals asynchronously from Redis; a missing field
+starts at zero. While reads fail or either value is invalid, the service logs and
+retries, continues processing CAN frames, and defers both energy fields without
+overwriting retained values. Energy integrated while waiting is added once to
+the restored totals. Sub-mWh remainders and energy while the service is stopped
+are not retained. The existing Redis connection health monitor restarts the service
+on a detected disconnect. Continuity across a Redis restart or power loss depends
+on Redis persistence; the service does not checkpoint energy to disk.
 
 The `engine-ecu` pub/sub channel carries field names for selected events,
 including `throttle`, `odometer`, `kers`, `kers-reason-off`,

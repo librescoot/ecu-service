@@ -34,6 +34,7 @@ type Status struct {
 	Power                int64
 	EnergyConsumed       uint64
 	EnergyRecovered      uint64
+	EnergyUnrestored     bool
 	Temperature          int8
 	FaultCode            uint32
 	FaultDesc            string
@@ -145,8 +146,10 @@ func (tx *IPCTx) SendStatus(s Status) error {
 	add("throttle", onOff(s.ThrottleOn), s.ThrottleOn != l.ThrottleOn)
 	add("brake", onOff(s.BrakeOn), s.BrakeOn != l.BrakeOn)
 	add("power", s.Power, s.Power != l.Power)
-	add("energy:consumed", s.EnergyConsumed, s.EnergyConsumed != l.EnergyConsumed)
-	add("energy:recovered", s.EnergyRecovered, s.EnergyRecovered != l.EnergyRecovered)
+	if !s.EnergyUnrestored {
+		add("energy:consumed", s.EnergyConsumed, l.EnergyUnrestored || s.EnergyConsumed != l.EnergyConsumed)
+		add("energy:recovered", s.EnergyRecovered, l.EnergyUnrestored || s.EnergyRecovered != l.EnergyRecovered)
+	}
 	add("temperature", s.Temperature, s.Temperature != l.Temperature)
 	add("fault:code", s.FaultCode, s.FaultCode != l.FaultCode)
 	add("fault:description", s.FaultDesc, s.FaultDesc != l.FaultDesc)
