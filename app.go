@@ -96,6 +96,11 @@ func NewApp(ctx context.Context, opts Options) (*App, error) {
 	log.Info("Connected to Redis at %s:%d", opts.RedisServer, opts.RedisPort)
 
 	a.ipcTx = newIPCTx(ctx, client, log)
+	a.ecu = newECU(nil, log, opts.GearRatioValues)
+	if err := a.loadEnergyTotals(); err != nil {
+		client.Close()
+		return nil, err
+	}
 	if err := a.loadCachedOdometer(); err != nil {
 		client.Close()
 		return nil, err
@@ -111,7 +116,7 @@ func NewApp(ctx context.Context, opts Options) (*App, error) {
 	a.bus = bus
 	a.motion = newMotionFeed()
 
-	a.ecu = newECU(bus, log, opts.GearRatioValues)
+	a.ecu.bus = bus
 	a.motion.allowed = func(at time.Time) bool { allowed, _ := a.ecu.motionState(at); return allowed }
 	a.battery = &BatteryTracker{}
 
