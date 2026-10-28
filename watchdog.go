@@ -57,6 +57,7 @@ type CommLostWatcher struct {
 	prevEcuPowered    bool
 	powerOnEdge       time.Time
 	probeAt           time.Time
+	driveStartProbeAt time.Time
 	probeFrame        time.Time
 	probeAttempts     int
 	failed            bool
@@ -110,6 +111,7 @@ func (w *CommLostWatcher) check() {
 	w.ecu.ApplyCommandedState()
 
 	shouldRaise := w.evaluate(ecuPowered)
+	w.requestDriveStartStatus(state, fields["drive-start-status"], ecuPowered, time.Now())
 
 	switch {
 	case shouldRaise && !w.published:
