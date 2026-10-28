@@ -19,8 +19,9 @@ const (
 	KERSReasonUnknown KERSReason = "unknown"
 )
 
-// KERSController decides when regen (KERS) may be enabled. Changes are applied
-// only while stopped and ready. Callbacks are always invoked without mu held.
+// KERSController decides when regen (KERS) may be enabled. The first decision
+// after entering ready-to-drive is applied right away; later changes only while
+// stopped and ready. Callbacks are always invoked without mu held.
 type KERSController struct {
 	mu               sync.Mutex
 	actionsMu        sync.Mutex
@@ -88,7 +89,11 @@ func (k *KERSController) timerLoop(ctx context.Context) {
 			}
 			k.engineReady = true
 			k.generation++
-			actions := k.updateKersLocked()
+			// This first decision of the ready period is applied even when the
+			// vehicle is already moving: riding off within the delay otherwise
+			// left regen off until the first full stop. Later changes still
+			// wait for a stop.
+			actions := k.decideKersLocked()
 			k.mu.Unlock()
 			k.runActions(actions)
 		}
@@ -109,13 +114,21 @@ func reasonForTemp(temp TempState) KERSReason {
 }
 
 // updateKersLocked recomputes state and returns work to run after unlocking.
+// While moving it only records the reason; the change is applied at the next
+// stop.
 func (k *KERSController) updateKersLocked() kersActions {
-	reason := reasonForTemp(k.temperatureState)
-	k.reason = reason
+	k.reason = reasonForTemp(k.temperatureState)
 	if !k.vehicleStopped {
 		return kersActions{}
 	}
+	return k.decideKersLocked()
+}
 
+// decideKersLocked recomputes state and returns work to run after unlocking,
+// whether or not the vehicle is moving.
+func (k *KERSController) decideKersLocked() kersActions {
+	reason := reasonForTemp(k.temperatureState)
+	k.reason = reason
 	actions := kersActions{generation: k.generation, callReason: true, reason: reason}
 	if k.engineReady {
 		actions.callEnable = true
