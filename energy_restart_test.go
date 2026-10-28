@@ -154,7 +154,12 @@ func TestEnergyDeferredPublicationAndRetry(t *testing.T) {
 				mr.HSet(ecuHashKey, "energy:recovered", "bad")
 			} else {
 				hook.fail.Store(true)
-				tx.raw.AddHook(hook)
+				// Install the hook before this client is used. The IPC client's
+				// connection monitor already uses its own raw client concurrently.
+				raw := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+				raw.AddHook(hook)
+				t.Cleanup(func() { raw.Close() })
+				tx.raw = raw
 			}
 			a := energyTestApp(t, tx)
 			a.opts.OdometerFile = filepath.Join(t.TempDir(), "odometer.json")
