@@ -96,6 +96,7 @@ func NewApp(ctx context.Context, opts Options) (*App, error) {
 	log.Info("Connected to Redis at %s:%d", opts.RedisServer, opts.RedisPort)
 
 	a.ipcTx = newIPCTx(ctx, client, log)
+	a.ecu = newECU(nil, log, opts.GearRatioValues)
 	if err := a.loadCachedOdometer(); err != nil {
 		client.Close()
 		return nil, err
@@ -111,7 +112,7 @@ func NewApp(ctx context.Context, opts Options) (*App, error) {
 	a.bus = bus
 	a.motion = newMotionFeed()
 
-	a.ecu = newECU(bus, log, opts.GearRatioValues)
+	a.ecu.bus = bus
 	a.motion.allowed = func(at time.Time) bool { allowed, _ := a.ecu.motionState(at); return allowed }
 	a.battery = &BatteryTracker{}
 
@@ -227,6 +228,12 @@ func (a *App) Run(ctx context.Context) error {
 	// field is the only artifact we get, and without this line it cannot be tied
 	// to a build without guessing from image tags.
 	a.log.Info("ecu-service %s starting", version)
+
+	a.canWG.Add(1)
+	go func() {
+		defer a.canWG.Done()
+		a.restoreEnergyTotals(ctx)
+	}()
 
 	// Subscribe to Redis channels and sync initial state.
 	a.ipcRx.Start()
@@ -480,6 +487,7 @@ func (a *App) onFrame(genuineStatus3 bool) {
 		notifyOdometer = a.acceptStatus3Odometer()
 	}
 
+	consumed, recovered, energyRestored := a.ecu.energyTotals()
 	s := Status{
 		Voltage:              a.ecu.Voltage(),
 		Current:              a.ecu.Current(),
@@ -490,8 +498,9 @@ func (a *App) onFrame(genuineStatus3 bool) {
 		ThrottleOn:           a.ecu.ThrottleOn(),
 		BrakeOn:              a.ecu.BrakeOn(),
 		Power:                a.ecu.Power(),
-		EnergyConsumed:       a.ecu.EnergyConsumed(),
-		EnergyRecovered:      a.ecu.EnergyRecovered(),
+		EnergyConsumed:       consumed,
+		EnergyRecovered:      recovered,
+		EnergyUnrestored:     !energyRestored,
 		Temperature:          a.ecu.Temperature(),
 		FaultCode:            a.ecu.FaultCode(),
 		Odometer:             a.odometer,
