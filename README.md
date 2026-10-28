@@ -69,6 +69,20 @@ Sent flags update only after successful batch completion. A completed socket
 write is distinct from the controller-reported KERS/boost/configuration values.
 Other services' CAN access is unchanged.
 
+### Ride-start status requests
+
+While `vehicle[state]` is `parked`, `drive-start-status` values `waiting-ecu`,
+`release-throttle`, and `stop-vehicle` request full ECU status snapshots at most
+once per second. This runs after the eight-second power-on grace, requires both
+power rails, and pauses during a communication fault. A recent watchdog probe
+also counts toward the request cooldown. No ride-start probes run in
+`ready-to-drive` or after a start timeout.
+
+These requests do not establish freshness by themselves. Vehicle-service waits
+for actual `engine-ecu:motion` reports before allowing drive entry. Other CAN
+status traffic can keep communication healthy without providing a current
+throttle sample, so the start requests are independent of silence detection.
+
 ### Controller power-on behavior
 
 The service does not immediately assert KERS and boost state when ECU power is
