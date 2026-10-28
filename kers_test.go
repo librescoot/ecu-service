@@ -116,3 +116,102 @@ func TestBatteryActiveTemperaturePrecedenceIsSlotIndependent(t *testing.T) {
 		t.Fatalf("no active batteries = %v, want unknown", got)
 	}
 }
+
+func TestKERSRidingOffWithinDelayStillEnables(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	enabled := make(chan bool, 2)
+	k := newKERSControllerWithDelay(ctx, 20*time.Millisecond, func(v bool) { enabled <- v }, func(KERSReason) {})
+	k.SetTempState(TempIdeal)
+	k.SetReadyToDrive(true)
+	k.UpdateVehicleStopped(false)
+
+	select {
+	case got := <-enabled:
+		if !got {
+			t.Fatal("riding off within the delay disabled KERS")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("riding off within the delay left KERS off until the next stop")
+	}
+}
+
+func TestKERSInitialDecisionSurvivesMovementRace(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	enabled := make(chan bool, 4)
+	k := newKERSControllerWithDelay(ctx, time.Millisecond, func(v bool) { enabled <- v }, nil)
+	k.SetTempState(TempIdeal)
+	k.actionsMu.Lock()
+	k.SetReadyToDrive(true)
+	deadline := time.Now().Add(time.Second)
+	for {
+		k.mu.Lock()
+		ready := k.engineReady
+		k.mu.Unlock()
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			k.actionsMu.Unlock()
+			t.Fatal("timer did not fire")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	done := make(chan struct{})
+	go func() { k.UpdateVehicleStopped(false); close(done) }()
+	for {
+		k.mu.Lock()
+		moving := !k.vehicleStopped
+		k.mu.Unlock()
+		if moving {
+			break
+		}
+		if time.Now().After(deadline) {
+			k.actionsMu.Unlock()
+			t.Fatal("movement was not recorded")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	k.actionsMu.Unlock()
+	<-done
+	select {
+	case got := <-enabled:
+		if !got {
+			t.Fatal("initial KERS decision disabled regen")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("initial KERS decision was lost on movement")
+	}
+}
+
+func TestKERSTemperatureChangeWhileMovingWaitsForStop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	enabled := make(chan bool, 3)
+	k := newKERSControllerWithDelay(ctx, time.Millisecond, func(v bool) { enabled <- v }, func(KERSReason) {})
+	k.SetTempState(TempIdeal)
+	k.SetReadyToDrive(true)
+	select {
+	case <-enabled:
+	case <-time.After(time.Second):
+		t.Fatal("KERS did not become ready")
+	}
+
+	k.UpdateVehicleStopped(false)
+	k.SetTempState(TempCold)
+	select {
+	case got := <-enabled:
+		t.Fatalf("KERS changed to %v while moving", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+	k.UpdateVehicleStopped(true)
+	select {
+	case got := <-enabled:
+		if got {
+			t.Fatal("cold battery enabled KERS at the stop")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cold battery did not disable KERS at the stop")
+	}
+}
