@@ -128,6 +128,10 @@ func (t *canTransport) receive(ctx context.Context) error {
 			invalidated = true
 			continue
 		}
+		// Other devices can flood the bus; only ECU traffic belongs in this queue.
+		if frame.ID&^0xF != frameStatus1 {
+			continue
+		}
 		event := receivedFrame{frame: frame, at: at}
 		if frame.ID == frameStatus1 {
 			event.motion = source.observe(frame, at)

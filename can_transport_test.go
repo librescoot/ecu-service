@@ -67,6 +67,31 @@ func waitFor(t *testing.T, condition func() bool) {
 	}
 }
 
+func TestUnrelatedCANFramesDoNotOverflowECUQueue(t *testing.T) {
+	s := newTestSocket()
+	tr := newCANTransport(s)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- tr.receive(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	for i := 0; i < 200; i++ {
+		s.rx <- receivedFrame{frame: can.Frame{ID: 0x80000946, Length: 8}, at: time.Now()}
+	}
+	s.rx <- receivedFrame{frame: statusMotion(), at: time.Now()}
+	select {
+	case got := <-tr.rx:
+		if got.frame.ID != frameStatus1 || got.motion == nil || !got.motion.Valid {
+			t.Fatalf("unexpected queued event: %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ECU frame not delivered")
+	}
+	if drops := tr.drops.Load(); drops != 0 {
+		t.Fatalf("unrelated traffic caused %d queue drops", drops)
+	}
+}
+
 func TestBlockedTXDoesNotBlockReceiveOrDecoder(t *testing.T) {
 	s := newTestSocket()
 	s.block = make(chan struct{})
