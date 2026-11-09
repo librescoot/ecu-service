@@ -14,6 +14,9 @@ const (
 	commLostProbeWait     = 1500 * time.Millisecond
 	commLostProbeInterval = 3 * time.Second
 	commLostRecoveryTime  = time.Second
+	// commLostIdleRecheck bounds how long the watcher sleeps while the ECU is
+	// unsupplied. Power edges wake it directly; this only covers a lost edge.
+	commLostIdleRecheck = 30 * time.Second
 	// ecuColdStartWorst is the longest measured delay between engine_power going
 	// on and the controller's first CAN frame. It is not one number: it varies by
 	// controller by a factor of four, measured with `lsc engine on`, stationary,
@@ -70,30 +73,60 @@ type CommLostWatcher struct {
 	// that has gone quiet stays quiet, so logging the condition rather than the
 	// transition would fill the journal for as long as it lasts.
 	silentAtRest bool
+	wake         chan struct{}
 }
 
 func newCommLostWatcher(client *ipc.Client, ecu *ECU, log *Logger, onChange func(bool)) *CommLostWatcher {
-	return &CommLostWatcher{ipc: client, ecu: ecu, log: log, onChange: onChange}
+	return &CommLostWatcher{ipc: client, ecu: ecu, log: log, onChange: onChange, wake: make(chan struct{}, 1)}
 }
 
+// Notify requests an immediate check. It never blocks.
+func (w *CommLostWatcher) Notify() {
+	select {
+	case w.wake <- struct{}{}:
+	default:
+	}
+}
+
+// Run ticks only while the ECU is supplied or an E20 is still published. An
+// unsupplied ECU has nothing to watch, so the loop then sleeps until a power
+// edge calls Notify.
 func (w *CommLostWatcher) Run(ctx context.Context) {
 	ticker := time.NewTicker(commLostTick)
 	defer ticker.Stop()
+	idle := time.NewTicker(commLostIdleRecheck)
+	defer idle.Stop()
+	ticking := true
 	for {
+		if w.check() {
+			if !ticking {
+				ticker.Reset(commLostTick)
+				ticking = true
+			}
+		} else if ticking {
+			ticker.Stop()
+			ticking = false
+		}
+		var tick <-chan time.Time
+		if ticking {
+			tick = ticker.C
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			w.check()
+		case <-tick:
+		case <-w.wake:
+		case <-idle.C:
 		}
 	}
 }
 
-func (w *CommLostWatcher) check() {
+// check reports whether the watcher needs to keep ticking.
+func (w *CommLostWatcher) check() bool {
 	fields, err := w.ipc.HGetAll("vehicle")
 	if err != nil {
 		w.log.Debug("comm-lost watchdog: read vehicle hash: %v", err)
-		return
+		return true
 	}
 	state := fields["state"]
 	// Refresh the state here as well as in the watcher: this tick owns the
@@ -131,6 +164,7 @@ func (w *CommLostWatcher) check() {
 		}
 		w.onChange(false)
 	}
+	return ecuPowered || w.published
 }
 
 // evaluate applies the power/staleness state to decide whether E20 should be

@@ -151,6 +151,10 @@ type ECU struct {
 	firmwareVersion      uint32
 	warrantyDate         uint32
 	gearsSentOnPower     bool // whether gearRatioValues have been sent since the ECU last powered on
+	// powerHook is told about every change of the power command so that
+	// monitors can sleep while the ECU is unsupplied. It runs under b.mu and
+	// must not block or call back into the ECU.
+	powerHook func(powered bool)
 	brakeFaultSeen       bool // edges the suppressed brake-applied log line
 	// powerCmd is what vehicle-service commanded, as seen in the vehicle hash.
 	// The ECU is only supplied in parked and ready-to-drive; frames sent while it
@@ -728,6 +732,13 @@ func (b *ECU) SetParked(parked bool) {
 	b.parked = parked
 }
 
+// SetPowerHook registers the change callback. Call it before the ECU is shared.
+func (b *ECU) SetPowerHook(hook func(powered bool)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.powerHook = hook
+}
+
 // SetPowered records what the vehicle hash says about the ECU's supply. This is
 // the only writer of the power command: a received frame is evidence the
 // controller is alive, which is a different fact and is handled separately.
@@ -745,6 +756,9 @@ func (b *ECU) SetPowered(powered bool) {
 	b.txGeneration++
 	b.pendingTX = nil
 	b.powerCmd = cmd
+	if b.powerHook != nil {
+		b.powerHook(powered)
+	}
 	b.timedBoost = TimedBoostStatus{}
 	b.timedBoostIdentity = false
 	b.log.Info("ECU power: %s", cmd)

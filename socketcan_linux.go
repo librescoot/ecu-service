@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"syscall"
 	"sync"
 	"time"
 
@@ -13,9 +15,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// timestampSocket reads through the Go runtime's network poller, so a blocked
+// Receive costs no wake-ups. The os.File owns fd; Send writes to the same
+// descriptor under mu, which Close takes before releasing it.
 type timestampSocket struct {
 	mu    sync.RWMutex
 	fd    int
+	file  *os.File
+	rc    syscall.RawConn
 	drops uint32
 }
 
@@ -28,9 +35,15 @@ func openCANTransport(device string) (*canTransport, error) {
 	if err != nil {
 		return nil, err
 	}
+	var file *os.File
 	ok := false
 	defer func() {
-		if !ok {
+		if ok {
+			return
+		}
+		if file != nil {
+			_ = file.Close()
+		} else {
 			_ = unix.Close(fd)
 		}
 	}()
@@ -46,8 +59,17 @@ func openCANTransport(device string) (*canTransport, error) {
 	if err := unix.Bind(fd, &unix.SockaddrCAN{Ifindex: iface.Index}); err != nil {
 		return nil, err
 	}
+	file = os.NewFile(uintptr(fd), device)
+	rc, err := file.SyscallConn()
+	if err != nil {
+		return nil, err
+	}
+	// Deadlines require the descriptor to be registered with the poller.
+	if err := file.SetReadDeadline(time.Time{}); err != nil {
+		return nil, err
+	}
 	ok = true
-	return newCANTransport(&timestampSocket{fd: fd}), nil
+	return newCANTransport(&timestampSocket{fd: fd, file: file, rc: rc}), nil
 }
 
 func (s *timestampSocket) Close() error {
@@ -56,53 +78,77 @@ func (s *timestampSocket) Close() error {
 	if s.fd < 0 {
 		return nil
 	}
-	err := unix.Close(s.fd)
+	err := s.file.Close()
 	s.fd = -1
 	return err
 }
 
 func (s *timestampSocket) Receive(ctx context.Context) (can.Frame, time.Time, string, error) {
+	if err := ctx.Err(); err != nil {
+		return can.Frame{}, time.Time{}, "", err
+	}
+	deadline, _ := ctx.Deadline()
+	if err := s.file.SetReadDeadline(deadline); err != nil {
+		return can.Frame{}, time.Time{}, "", errors.New("CAN socket closed")
+	}
+	// Cancellation interrupts the poller wait by moving the deadline into the
+	// past. Wait for a callback that already started so it cannot touch the
+	// deadline of the next call.
+	fired := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = s.file.SetReadDeadline(time.Unix(1, 0))
+		close(fired)
+	})
+	defer func() {
+		if !stop() {
+			<-fired
+		}
+	}()
+	return s.receiveOne(ctx)
+}
+
+func (s *timestampSocket) receiveOne(ctx context.Context) (can.Frame, time.Time, string, error) {
 	var data [16]byte
 	var control [128]byte
-	for ctx.Err() == nil {
-		s.mu.RLock()
-		fd := s.fd
-		if fd < 0 {
-			s.mu.RUnlock()
+	var n, oobn, flags int
+	var recvErr error
+	err := s.rc.Read(func(fd uintptr) bool {
+		for {
+			n, oobn, flags, _, recvErr = unix.Recvmsg(int(fd), data[:], control[:], unix.MSG_DONTWAIT)
+			if recvErr == unix.EINTR {
+				continue
+			}
+			return recvErr != unix.EAGAIN
+		}
+	})
+	if err != nil {
+		switch {
+		case ctx.Err() != nil:
+			return can.Frame{}, time.Time{}, "", ctx.Err()
+		case errors.Is(err, os.ErrDeadlineExceeded):
+			return can.Frame{}, time.Time{}, "", context.DeadlineExceeded
+		case errors.Is(err, os.ErrClosed):
 			return can.Frame{}, time.Time{}, "", errors.New("CAN socket closed")
 		}
-		n, oobn, flags, _, err := unix.Recvmsg(fd, data[:], control[:], unix.MSG_DONTWAIT)
-		s.mu.RUnlock()
-		if err == unix.EAGAIN || err == unix.EINTR {
-			poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-			_, err = unix.Poll(poll, 20)
-			if err != nil && err != unix.EINTR {
-				return can.Frame{}, time.Time{}, "", err
-			}
-			if poll[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
-				return can.Frame{}, time.Time{}, "", fmt.Errorf("CAN socket unavailable: poll=%#x", poll[0].Revents)
-			}
-			continue
-		}
-		if err != nil {
-			return can.Frame{}, time.Time{}, "", err
-		}
-		var frame can.Frame
-		if n != len(data) || flags&(unix.MSG_TRUNC|unix.MSG_CTRUNC) != 0 || can.Unmarshal(data[:], &frame) != nil {
-			return frame, time.Time{}, "malformed-frame", nil
-		}
-		if frame.ID&unix.CAN_ERR_FLAG != 0 {
-			return frame, time.Time{}, "transport-error", nil
-		}
-		messages, err := unix.ParseSocketControlMessage(control[:oobn])
-		if err != nil {
-			return frame, time.Time{}, "missing-timestamp", nil
-		}
-		at, drops, reason := receiveMetadata(messages, time.Now(), s.drops)
-		s.drops = drops
-		return frame, at, reason, nil
+		return can.Frame{}, time.Time{}, "", err
 	}
-	return can.Frame{}, time.Time{}, "", ctx.Err()
+	if recvErr != nil {
+		return can.Frame{}, time.Time{}, "", recvErr
+	}
+	var frame can.Frame
+	if n != len(data) || flags&(unix.MSG_TRUNC|unix.MSG_CTRUNC) != 0 || can.Unmarshal(data[:], &frame) != nil {
+		return frame, time.Time{}, "malformed-frame", nil
+	}
+	if frame.ID&unix.CAN_ERR_FLAG != 0 {
+		return frame, time.Time{}, "transport-error", nil
+	}
+	messages, err := unix.ParseSocketControlMessage(control[:oobn])
+	if err != nil {
+		return frame, time.Time{}, "missing-timestamp", nil
+	}
+	at, drops, reason := receiveMetadata(messages, time.Now(), s.drops)
+	s.drops = drops
+	return frame, at, reason, nil
 }
 
 func (s *timestampSocket) Send(ctx context.Context, frame can.Frame, allowed func() bool) error {

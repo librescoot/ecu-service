@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -129,10 +130,24 @@ type CanLinkWatcher struct {
 
 	havePrev bool
 	prev     canLinkSample
+
+	// active gates sampling to the time the ECU is supplied; an unsupplied
+	// link has no traffic to attribute.
+	active atomic.Bool
+	wake   chan struct{}
 }
 
 func newCanLinkWatcher(src canLinkReader, ifname string, log *Logger) *CanLinkWatcher {
-	return &CanLinkWatcher{src: src, ifname: ifname, log: log}
+	return &CanLinkWatcher{src: src, ifname: ifname, log: log, wake: make(chan struct{}, 1)}
+}
+
+// SetActive starts or stops sampling. It never blocks.
+func (w *CanLinkWatcher) SetActive(active bool) {
+	w.active.Store(active)
+	select {
+	case w.wake <- struct{}{}:
+	default:
+	}
 }
 
 // Failure ignores expired samples so a failed monitor cannot latch E20.
@@ -154,12 +169,28 @@ func (w *CanLinkWatcher) Run(ctx context.Context) {
 	ticker := time.NewTicker(canLinkTick)
 	defer ticker.Stop()
 	defer w.src.Close()
+	ticking := true
 	for {
+		active := w.active.Load()
+		if active {
+			w.check()
+			if !ticking {
+				ticker.Reset(canLinkTick)
+				ticking = true
+			}
+		} else if ticking {
+			ticker.Stop()
+			ticking = false
+		}
+		var tick <-chan time.Time
+		if ticking {
+			tick = ticker.C
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			w.check()
+		case <-tick:
+		case <-w.wake:
 		}
 	}
 }

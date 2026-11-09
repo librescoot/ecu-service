@@ -161,6 +161,12 @@ func NewApp(ctx context.Context, opts Options) (*App, error) {
 	} else {
 		a.canLink = newCanLinkWatcher(link, opts.CANDevice, log)
 	}
+	a.ecu.SetPowerHook(func(powered bool) {
+		if a.canLink != nil {
+			a.canLink.SetActive(powered)
+		}
+		a.commLost.Notify()
+	})
 
 	return a, nil
 }

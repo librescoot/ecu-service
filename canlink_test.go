@@ -6,7 +6,9 @@ import (
 	"encoding/binary"
 	"log"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -309,5 +311,43 @@ func TestParseCANLinkReply_RejectsNonCANLink(t *testing.T) {
 
 	if _, err := parseCANLinkReply(msg, seq, "can0"); err == nil {
 		t.Fatal("a vxcan link was accepted as CAN")
+	}
+}
+
+type countingLink struct{ reads atomic.Int32 }
+
+func (c *countingLink) Read() (canLinkSample, error) {
+	c.reads.Add(1)
+	return canLinkSample{State: canStateErrorActive}, nil
+}
+func (c *countingLink) Close() {}
+
+// An unsupplied ECU has no bus traffic to attribute: the link is not sampled
+// until the power hook activates the watcher, and sampling stops again after.
+func TestCanLinkWatcher_SamplesOnlyWhileActive(t *testing.T) {
+	src := &countingLink{}
+	w := newCanLinkWatcher(src, "can0", &Logger{l: log.New(&bytes.Buffer{}, "", 0), level: LogLevelError})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+
+	time.Sleep(100 * time.Millisecond)
+	if n := src.reads.Load(); n != 0 {
+		t.Fatalf("inactive watcher sampled %d times", n)
+	}
+	w.SetActive(true)
+	deadline := time.Now().Add(time.Second)
+	for src.reads.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if src.reads.Load() == 0 {
+		t.Fatal("active watcher did not sample")
+	}
+	w.SetActive(false)
+	time.Sleep(50 * time.Millisecond)
+	n := src.reads.Load()
+	time.Sleep(1200 * time.Millisecond)
+	if got := src.reads.Load(); got != n {
+		t.Fatalf("watcher kept sampling after deactivation: %d -> %d", n, got)
 	}
 }

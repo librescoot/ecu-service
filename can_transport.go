@@ -108,7 +108,14 @@ func (t *canTransport) receive(ctx context.Context) error {
 			t.enqueue(receivedFrame{motion: source.invalid("silence")}, &source)
 			invalidated = true
 		}
-		readCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		// Only a still-valid motion window needs a wake-up without traffic, at
+		// the moment it expires. Once invalidated the read blocks until a frame
+		// arrives, so an unpowered ECU costs no wake-ups.
+		readCtx, cancel := ctx, context.CancelFunc(func() {})
+		if !invalidated {
+			wait := time.Until(lastMotion.Add(motionEvidenceMaxAge)) + time.Millisecond
+			readCtx, cancel = context.WithTimeout(ctx, max(wait, time.Millisecond))
+		}
 		frame, at, reason, err := t.socket.Receive(readCtx)
 		cancel()
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
