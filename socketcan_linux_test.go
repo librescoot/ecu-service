@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/brutella/can"
+	"golang.org/x/sys/unix"
 )
 
 // Needs a CAN interface. Run in a private namespace:
@@ -62,6 +63,23 @@ func TestSocketCANReceiveBlocksWithoutWakeups(t *testing.T) {
 	time.Sleep(2 * time.Second)
 	if n := ctxSwitches(t) - before; n > 20 {
 		t.Fatalf("idle receive caused %d context switches in 2s", n)
+	}
+
+	// Other devices on the bus must not wake the receiver at all.
+	before = ctxSwitches(t)
+	for i := 0; i < 500; i++ {
+		for _, id := range []uint32{0x123, 0x7D0, 0x7F0, 0x80000946, unix.CAN_RTR_FLAG | frameStatus1} {
+			_ = tx.socket.Send(context.Background(), can.Frame{ID: id, Length: 8}, func() bool { return true })
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := ctxSwitches(t) - before; n > 30 {
+		t.Fatalf("unrelated bus traffic caused %d context switches", n)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("unrelated frame delivered: %v", err)
+	default:
 	}
 
 	frame := can.Frame{ID: frameStatus1, Length: 8}

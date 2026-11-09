@@ -56,6 +56,12 @@ func openCANTransport(device string) (*canTransport, error) {
 			return nil, err
 		}
 	}
+	// Only the controller's standard frames (0x7E0-0x7EF) are of interest. The
+	// kernel drops everything else, so other devices on the bus cost no wake-ups.
+	filter := []unix.CanFilter{{Id: frameStatus1, Mask: 0x7F0 | unix.CAN_EFF_FLAG | unix.CAN_RTR_FLAG}}
+	if err := unix.SetsockoptCanRawFilter(fd, unix.SOL_CAN_RAW, unix.CAN_RAW_FILTER, filter); err != nil {
+		return nil, err
+	}
 	if err := unix.Bind(fd, &unix.SockaddrCAN{Ifindex: iface.Index}); err != nil {
 		return nil, err
 	}
