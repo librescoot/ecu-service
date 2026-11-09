@@ -154,8 +154,8 @@ type ECU struct {
 	// powerHook is told about every change of the power command so that
 	// monitors can sleep while the ECU is unsupplied. It runs under b.mu and
 	// must not block or call back into the ECU.
-	powerHook func(powered bool)
-	brakeFaultSeen       bool // edges the suppressed brake-applied log line
+	powerHook      func(powered bool)
+	brakeFaultSeen bool // edges the suppressed brake-applied log line
 	// powerCmd is what vehicle-service commanded, as seen in the vehicle hash.
 	// The ECU is only supplied in parked and ready-to-drive; frames sent while it
 	// is dark are never acknowledged, and enough unacknowledged frames walk the
@@ -383,8 +383,9 @@ func (b *ECU) handleStatus1(frame can.Frame) {
 
 	b.voltage = int(binary.BigEndian.Uint16(frame.Data[0:2])) * 10
 	b.current = int(int16(binary.BigEndian.Uint16(frame.Data[2:4]))) * 10
-	rpm, rawSpeed, throttle := decodeMotionValues(frame)
-	b.rpm, b.rawSpeed, b.throttleOn = rpm, uint16(rawSpeed), throttle
+	b.rpm = binary.BigEndian.Uint16(frame.Data[4:6])
+	b.rawSpeed = uint16(frame.Data[6])
+	b.throttleOn = frame.Data[7]&1 != 0
 	b.speed = b.calibratedSpeed(b.rawSpeed)
 	b.brakeOn = frame.Data[7]&0x02 != 0
 

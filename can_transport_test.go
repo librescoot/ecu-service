@@ -3,16 +3,13 @@ package main
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/brutella/can"
-	"github.com/redis/go-redis/v9"
 	"golang.org/x/sys/unix"
 )
 
@@ -81,7 +78,7 @@ func TestUnrelatedCANFramesDoNotOverflowECUQueue(t *testing.T) {
 	s.rx <- receivedFrame{frame: statusMotion(), at: time.Now()}
 	select {
 	case got := <-tr.rx:
-		if got.frame.ID != frameStatus1 || got.motion == nil || !got.motion.Valid {
+		if got.frame.ID != frameStatus1 {
 			t.Fatalf("unexpected queued event: %+v", got)
 		}
 	case <-time.After(time.Second):
@@ -206,24 +203,6 @@ func TestTXCompletionOrderingAndPartialFailure(t *testing.T) {
 	}
 }
 
-func TestReceiveQueueOverflowResetsSourceBeforeFreshData(t *testing.T) {
-	tr := newCANTransport(newTestSocket())
-	source := newMotionSource()
-	old := source.source
-	for i := 0; i <= canQueueSize; i++ {
-		tr.enqueue(receivedFrame{motion: source.observe(statusMotion(), time.Now())}, &source)
-	}
-	e := <-tr.rx
-	if e.motion.Valid || e.motion.Reason != "rx-queue-overflow" || source.source == old || tr.drops.Load() != canQueueSize+1 {
-		t.Fatal("overflow hidden")
-	}
-	tr.enqueue(receivedFrame{motion: source.observe(statusMotion(), time.Now())}, &source)
-	next := <-tr.rx
-	if next.motion.Source != e.motion.Source || next.motion.Sequence != e.motion.Sequence+1 {
-		t.Fatal("resumption not ordered")
-	}
-}
-
 func TestBlockedLegacyDispatchDoesNotBlockReceivePump(t *testing.T) {
 	s := newTestSocket()
 	tr := newCANTransport(s)
@@ -258,7 +237,7 @@ func TestKernelMetadata(t *testing.T) {
 				binary.NativeEndian.PutUint64(data[8:], uint64(at.Nanosecond()))
 			}
 			got, err := kernelReceiveTime(data, now)
-			want := age >= 0 && age <= motionEvidenceMaxAge
+			want := age >= 0 && age <= frameMaxAge
 			if (err == nil) != want || (want && !got.Equal(at)) {
 				t.Fatalf("size=%d age=%v got=%v err=%v", size, age, got, err)
 			}
@@ -286,125 +265,47 @@ func TestKernelMetadata(t *testing.T) {
 	}
 }
 
-func TestMotionContractAndPublishOverflow(t *testing.T) {
-	source := newMotionSource()
-	f := statusMotion()
-	a := source.observe(f, time.Now())
-	b := source.observe(f, time.Now())
-	if a.Sequence+1 != b.Sequence || a.Source != b.Source || *a.RPM != 0 || *a.RawSpeed != 0 || *a.ThrottleOn {
-		t.Fatal("unchanged evidence missing")
+// A stalled dispatcher drops the newest frames and counts them; the ordered
+// backlog already queued is kept.
+func TestReceiveQueueOverflowDropsNewestAndCounts(t *testing.T) {
+	tr := newCANTransport(newTestSocket())
+	for i := 0; i < canQueueSize+3; i++ {
+		frame := statusMotion()
+		frame.Data[0] = byte(i)
+		tr.enqueue(receivedFrame{frame: frame, at: time.Now()})
 	}
-	f.Data[4], f.Data[5], f.Data[6], f.Data[7] = 1, 2, 3, 1
-	e := source.observe(f, time.Now())
-	if *e.RPM != 258 || *e.RawSpeed != 3 || !*e.ThrottleOn {
-		t.Fatal("wrong decoded values")
+	if got := tr.drops.Load(); got != 3 {
+		t.Fatalf("drops=%d, want 3", got)
 	}
-	for _, frame := range []can.Frame{{ID: frameStatus1, Length: 7}, {ID: frameStatus1 | unix.CAN_RTR_FLAG, Length: 8}, {ID: frameStatus1 | unix.CAN_EFF_FLAG, Length: 8}} {
-		if source.observe(frame, time.Now()).Valid {
-			t.Fatal("non-motion frame accepted")
+	for i := 0; i < canQueueSize; i++ {
+		if e := <-tr.rx; e.frame.Data[0] != byte(i) {
+			t.Fatalf("backlog reordered at %d", i)
 		}
-	}
-	invalid := source.invalid("transport-error")
-	data, _ := json.Marshal(invalid)
-	var fields map[string]any
-	_ = json.Unmarshal(data, &fields)
-	if _, ok := fields["rpm"]; ok {
-		t.Fatal("invalidation fabricated zero motion")
-	}
-	feed := newMotionFeed()
-	for i := 0; i <= canQueueSize; i++ {
-		feed.offer(source.observe(statusMotion(), time.Now()))
-	}
-	if e := <-feed.queue; e.Valid || e.Reason != "publish-queue-overflow" {
-		t.Fatal("publication loss hidden")
 	}
 }
 
-func TestMotionDropsExpiredQueuedData(t *testing.T) {
+func TestDispatcherDropsFramesThatWaitedTooLong(t *testing.T) {
+	s := newTestSocket()
+	tr := newCANTransport(s)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	feed := newMotionFeed()
-	source := newMotionSource()
-	feed.offer(source.observe(statusMotion(), time.Now().Add(-time.Second)))
-	done := make(chan struct{})
-	go func() {
-		feed.run(ctx, func(ctx context.Context, payload []byte) error {
-			var e motionEvidence
-			if err := json.Unmarshal(payload, &e); err != nil {
-				t.Error(err)
-			}
-			if e.Valid {
-				t.Error("stale frame replayed")
-			}
-			cancel()
-			return nil
-		})
-		close(done)
-	}()
-	<-done
-}
-
-// Cross-repository integration fixture: kernel-timestamped datagrams containing
-// CAN frames, the real receive adapter/decoder/publisher, and isolated Redis.
-// No CAN interface or vehicle hardware is opened.
-func TestMotionIPCProducerFixture(t *testing.T) {
-	path := os.Getenv("MOTION_TEST_REDIS_SOCKET")
-	if path == "" {
-		t.Skip("cross-repository integration fixture")
-	}
-	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unix.Close(pair[1])
-	if err := unix.SetsockoptInt(pair[0], unix.SOL_SOCKET, unix.SO_TIMESTAMPNS, 1); err != nil {
-		t.Fatal(err)
-	}
-	tr := newCANTransport(&timestampSocket{fd: pair[0]})
-	client := redis.NewClient(motionRedisOptions(&redis.Options{Network: "unix", Addr: path}))
-	defer client.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
-	defer cancel()
-	feed := newMotionFeed()
-	ecu := newECU(nil, newLogger(LogLevelNone), nil)
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		feed.run(ctx, func(ctx context.Context, payload []byte) error {
-			err := client.Publish(ctx, motionEvidenceChannel, payload).Err()
-			if err != nil {
-				t.Logf("motion publication failed: %v; payload=%s", err, payload)
-			}
-			return err
-		})
-	}()
-	go func() {
-		defer wg.Done()
-		_ = tr.Run(ctx, func(e receivedFrame) {
-			if e.motion != nil {
-				if e.motion.Valid && !ecu.HandleFrameAt(e.frame, e.at) {
-					e.motion = invalidMotion(e.motion, "decoder-rejected")
-				}
-				if !e.motion.Valid {
-					t.Logf("motion invalidated: %+v", *e.motion)
-				}
-				feed.offer(e.motion)
-			}
-		})
-	}()
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-	data, _ := can.Marshal(statusMotion())
-	for ctx.Err() == nil {
-		select {
-		case <-ctx.Done():
-		case <-ticker.C:
-			if _, err := unix.Write(pair[1], data); err != nil {
-				t.Error(err)
-				cancel()
-			}
+	got := make(chan can.Frame, 4)
+	done := make(chan error, 1)
+	go func() { done <- tr.Run(ctx, func(e receivedFrame) { got <- e.frame }) }()
+	stale := statusMotion()
+	stale.Data[0] = 1
+	fresh := statusMotion()
+	fresh.Data[0] = 2
+	s.rx <- receivedFrame{frame: stale, at: time.Now().Add(-frameMaxAge - time.Second)}
+	s.rx <- receivedFrame{frame: fresh, at: time.Now()}
+	select {
+	case f := <-got:
+		if f.Data[0] != 2 {
+			t.Fatalf("stale frame dispatched: %d", f.Data[0])
 		}
+	case <-time.After(time.Second):
+		t.Fatal("fresh frame not dispatched")
 	}
-	wg.Wait()
+	cancel()
+	<-done
 }

@@ -11,7 +11,6 @@ import (
 
 	"github.com/brutella/can"
 	ipc "github.com/librescoot/redis-ipc"
-	"github.com/redis/go-redis/v9"
 )
 
 const redisHealthInterval = 30 * time.Second
@@ -23,24 +22,19 @@ const (
 )
 
 type App struct {
-	opts                  Options
-	log                   *Logger
-	ipc                   *ipc.Client
-	ecu                   *ECU
-	battery               *BatteryTracker
-	kers                  *KERSController
-	diag                  *Diagnostics
-	ipcTx                 *IPCTx
-	ipcRx                 *IPCRx
-	commLost              *CommLostWatcher
-	canLink               *CanLinkWatcher
-	socketUnavailable     atomic.Bool
-	motionWG              sync.WaitGroup
-	canWG                 sync.WaitGroup
-	motion                *motionFeed
-	motionInputSource     string
-	motionOutputSource    string
-	motionPowerGeneration uint64
+	opts              Options
+	log               *Logger
+	ipc               *ipc.Client
+	ecu               *ECU
+	battery           *BatteryTracker
+	kers              *KERSController
+	diag              *Diagnostics
+	ipcTx             *IPCTx
+	ipcRx             *IPCRx
+	commLost          *CommLostWatcher
+	canLink           *CanLinkWatcher
+	socketUnavailable atomic.Bool
+	canWG             sync.WaitGroup
 
 	// Serialize CAN fault publication with watchdog transitions.
 	faultMu        sync.Mutex
@@ -110,10 +104,8 @@ func NewApp(ctx context.Context, opts Options) (*App, error) {
 		return nil, fmt.Errorf("CAN bus open: %w", err)
 	}
 	a.bus = bus
-	a.motion = newMotionFeed()
 
 	a.ecu.bus = bus
-	a.motion.allowed = func(at time.Time) bool { allowed, _ := a.ecu.motionState(at); return allowed }
 	a.battery = &BatteryTracker{}
 
 	// Publish a zero-valued config so any stale config:* fields left behind
@@ -245,15 +237,6 @@ func (a *App) Run(ctx context.Context) error {
 	a.ipcRx.Start()
 
 	// One receive pump and one asynchronous transmitter share the same socket.
-	motionRedis := redis.NewClient(motionRedisOptions(a.ipc.Raw().Options()))
-	a.motionWG.Add(1)
-	go func() {
-		defer a.motionWG.Done()
-		defer motionRedis.Close()
-		a.motion.run(ctx, func(callCtx context.Context, payload []byte) error {
-			return motionRedis.Publish(callCtx, motionEvidenceChannel, payload).Err()
-		})
-	}()
 	a.canWG.Add(1)
 	go a.runCANBusLoop(ctx)
 
@@ -279,12 +262,11 @@ func (a *App) Run(ctx context.Context) error {
 	a.busMu.Unlock()
 
 	a.canWG.Wait()
-	a.motionWG.Wait()
 	a.ipc.Close()
 	return nil
 }
 
-// A reconnect invalidates pending commands and starts a new motion generation.
+// A reconnect invalidates pending commands.
 func (a *App) runCANBusLoop(ctx context.Context) {
 	defer a.canWG.Done()
 	a.busMu.Lock()
@@ -309,7 +291,6 @@ func (a *App) runCANBusLoop(ctx context.Context) {
 			a.log.Error("CAN bus error: %v", err)
 		}
 		a.ecu.UpdateBus(nil)
-		a.motion.offer(newMotionSource().invalid("transport-error"))
 		a.socketUnavailable.Store(true)
 
 		select {
@@ -406,21 +387,7 @@ func (h *appHandler) Handle(frame can.Frame) {
 }
 
 func (a *App) handleReceived(e receivedFrame) {
-	if e.motion != nil {
-		allowed, generation := a.ecu.motionState(e.at)
-		if a.motionInputSource != e.motion.Source || a.motionPowerGeneration != generation {
-			a.motionInputSource, a.motionPowerGeneration = e.motion.Source, generation
-			a.motionOutputSource = newMotionSource().source
-		}
-		e.motion.Source = a.motionOutputSource
-		if e.motion.Valid && !allowed {
-			e.motion = invalidMotion(e.motion, "powered-off")
-		}
-		a.motion.offer(e.motion)
-	}
-	if !e.at.IsZero() {
-		a.handleFrameAt(e.frame, e.at)
-	}
+	a.handleFrameAt(e.frame, e.at)
 }
 
 func (a *App) handleFrameAt(frame can.Frame, received time.Time) {

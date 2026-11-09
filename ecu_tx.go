@@ -76,12 +76,6 @@ func (b *ECU) submitLocked(frames []can.Frame, purpose string, heard bool) error
 	return nil
 }
 
-func (b *ECU) motionState(at time.Time) (bool, uint64) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.powerCmd != powerOff && (b.powerCmd != powerOn || !at.Before(b.powerOnAt)), b.txGeneration
-}
-
 func (b *ECU) changedControlLocked() {
 	b.controlRevision++
 	b.stateAssertedToECU, b.stateAckedByECU = false, false

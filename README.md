@@ -46,18 +46,14 @@ Fault presence is stored in `engine-ecu:fault`; changes are also appended to
 `battery:0`, and `battery:1` to determine KERS eligibility. Battery state is
 considered active only when its `state` field is `active`.
 
-### Fresh motion and asynchronous CAN I/O
+### Asynchronous CAN I/O
 
-The additive `engine-ecu:motion` channel publishes complete direct-value JSON
-observations on every motion frame, including unchanged values. See the
-[versioned contract and isolated integration test](MOTION_IPC.md). The existing
-hash/change-notification interface remains unchanged.
-
-One timestamp-aware CAN receive pump feeds a 64-entry ordered dispatcher queue.
-Legacy Redis publication cannot block physical reception; an overflow discards
-queued work and invalidates motion continuity. Receive timestamps, rather than
-callback time, establish controller liveness. Expired buffered traffic cannot
-refresh it.
+One timestamp-aware CAN receive pump blocks in the runtime's network poller, so
+an idle or unpowered bus costs no wake-ups. It feeds a 64-entry ordered
+dispatcher queue. Redis publication cannot block physical reception; when the
+queue is full the newest frames are dropped and counted in the traffic summary.
+Receive timestamps, rather than callback time, establish controller liveness.
+Frames that waited longer than 500 ms are not dispatched.
 
 One asynchronous TX worker shares that same socket. Control code submits bounded
 batches without performing socket writes under the ECU state mutex or in a receive
@@ -78,10 +74,9 @@ power rails, and pauses during a communication fault. A recent watchdog probe
 also counts toward the request cooldown. No ride-start probes run in
 `ready-to-drive` or after a start timeout.
 
-These requests do not establish freshness by themselves. Vehicle-service waits
-for actual `engine-ecu:motion` reports before allowing drive entry. Other CAN
-status traffic can keep communication healthy without providing a current
-throttle sample, so the start requests are independent of silence detection.
+Other CAN status traffic can keep communication healthy without providing a
+current throttle sample, so the start requests are independent of silence
+detection.
 
 ### Timed boost telemetry
 
@@ -149,6 +144,10 @@ three seconds of silence and 1.5 seconds without a reply after the second reques
 (normally about 5.5 seconds total). Failed sends count as attempts, not replies.
 A known unavailable receive socket or a recent CAN bus-off/stopped/sleeping sample
 raises E20 directly after startup grace, with the transport cause logged separately.
+The watchdog and the CAN link sampler run only while the ECU is supplied
+(`engine-power` and `main-power` both on) or an E20 is still published; power
+edges wake them, and a 30 second recheck covers a missed edge. An unpowered ECU
+costs no periodic work.
 
 An isolated frame does not clear E20: recovery requires traffic spanning one second
 without a receive gap exceeding one second, or a reply to a separate, rate-limited

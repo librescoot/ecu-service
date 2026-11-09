@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"syscall"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/brutella/can"
@@ -205,7 +205,7 @@ func kernelReceiveTime(data []byte, now time.Time) (time.Time, error) {
 		return time.Time{}, errors.New("invalid timestamp")
 	}
 	age := now.Sub(time.Unix(sec, nsec))
-	if age < 0 || age > motionEvidenceMaxAge {
+	if age < 0 || age > frameMaxAge {
 		return time.Time{}, errors.New("timestamp outside freshness window")
 	}
 	return now.Add(-age), nil

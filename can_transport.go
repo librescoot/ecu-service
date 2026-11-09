@@ -33,9 +33,8 @@ type txRequest struct {
 type canTransmitter interface{ Submit(txRequest) error }
 
 type receivedFrame struct {
-	frame  can.Frame
-	at     time.Time
-	motion *motionEvidence
+	frame can.Frame
+	at    time.Time
 }
 
 type canTransport struct {
@@ -99,76 +98,39 @@ func (t *canTransport) transmit(ctx context.Context) {
 }
 
 func (t *canTransport) receive(ctx context.Context) error {
-	source := newMotionSource()
 	var previous time.Time
-	lastMotion := time.Now()
-	invalidated := false
 	for ctx.Err() == nil {
-		if !invalidated && !motionTimeFresh(lastMotion, time.Now()) {
-			t.enqueue(receivedFrame{motion: source.invalid("silence")}, &source)
-			invalidated = true
-		}
-		// Only a still-valid motion window needs a wake-up without traffic, at
-		// the moment it expires. Once invalidated the read blocks until a frame
-		// arrives, so an unpowered ECU costs no wake-ups.
-		readCtx, cancel := ctx, context.CancelFunc(func() {})
-		if !invalidated {
-			wait := time.Until(lastMotion.Add(motionEvidenceMaxAge)) + time.Millisecond
-			readCtx, cancel = context.WithTimeout(ctx, max(wait, time.Millisecond))
-		}
-		frame, at, reason, err := t.socket.Receive(readCtx)
-		cancel()
-		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			continue
-		}
+		// Blocks until a frame arrives or the context ends: an idle bus costs
+		// no wake-ups.
+		frame, at, reason, err := t.socket.Receive(ctx)
 		if err != nil {
 			return err
 		}
 		now := time.Now()
-		if clockJump(previous, now) {
-			reason = "clock-change"
-		}
+		jumped := clockJump(previous, now)
 		previous = now
-		if reason != "" {
-			source = newMotionSource()
-			t.enqueue(receivedFrame{motion: source.invalid(reason)}, &source)
-			invalidated = true
+		// A frame without a trustworthy kernel timestamp, a malformed frame, an
+		// error frame or a clock step cannot be ordered against ECU state.
+		if reason != "" || jumped {
 			continue
 		}
 		// Other devices can flood the bus; only ECU traffic belongs in this queue.
 		if frame.ID&^0xF != frameStatus1 {
 			continue
 		}
-		event := receivedFrame{frame: frame, at: at}
-		if frame.ID == frameStatus1 {
-			event.motion = source.observe(frame, at)
-			lastMotion, invalidated = at, !event.motion.Valid
-		}
-		t.enqueue(event, &source)
+		t.enqueue(receivedFrame{frame: frame, at: at})
 	}
 	return ctx.Err()
 }
 
-func (t *canTransport) enqueue(e receivedFrame, source **motionSource) {
+// A full queue means the dispatcher is stalled. Dropping the newest frame keeps
+// the ordered backlog intact; the loss is reported in the traffic summary.
+func (t *canTransport) enqueue(e receivedFrame) {
 	select {
 	case t.rx <- e:
-		return
 	default:
+		t.drops.Add(1)
 	}
-	// Losing any frame can conceal a throttle pulse or a transport fault.
-	// Discard the backlog and announce a new receive generation before resuming.
-	for {
-		select {
-		case <-t.rx:
-			t.drops.Add(1)
-		default:
-			goto drained
-		}
-	}
-drained:
-	t.drops.Add(1)
-	*source = newMotionSource()
-	t.rx <- receivedFrame{motion: (*source).invalid("rx-queue-overflow")}
 }
 
 // The socket pump and TX worker never execute Redis or decoder callbacks.
@@ -208,19 +170,22 @@ func (t *canTransport) Run(ctx context.Context, dispatch func(receivedFrame)) er
 		case err := <-stopped:
 			return err
 		case e := <-t.rx:
-			if e.motion == nil || e.motion.Valid {
-				if !motionTimeFresh(e.at, time.Now()) {
-					if e.motion != nil {
-						e.motion = invalidMotion(e.motion, "dispatch-expired")
-					} else {
-						continue
-					}
-					e.frame, e.at = can.Frame{}, time.Time{}
-				}
+			// Frames that waited too long behind a stalled dispatcher are not
+			// replayed as current controller traffic.
+			if !frameFresh(e.at, time.Now()) {
+				continue
 			}
 			dispatch(e)
 		}
 	}
+}
+
+// frameMaxAge bounds how long a received frame may wait before dispatch.
+const frameMaxAge = 500 * time.Millisecond
+
+func frameFresh(at, now time.Time) bool {
+	age, wallAge := now.Sub(at), time.Duration(now.UnixNano()-at.UnixNano())
+	return !at.IsZero() && age >= 0 && age <= frameMaxAge && wallAge >= 0 && wallAge <= frameMaxAge && !clockJump(at, now)
 }
 
 func commandCurrent(deadline, now time.Time) bool {
