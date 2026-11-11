@@ -76,6 +76,72 @@ func TestPublishNotificationsUseHashChannelAndFieldMessage(t *testing.T) {
 	}
 }
 
+func TestUpdatedAtPublishesValidMotionTimeAtMostOncePerSecond(t *testing.T) {
+	tx, mr := newTestTx(t)
+	sub := redis.NewClient(&redis.Options{Addr: mr.Addr()}).Subscribe(context.Background(), ecuChannel)
+	t.Cleanup(func() { sub.Close() })
+	if _, err := sub.Receive(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	first := time.Unix(1700000000, 123000000)
+	if err := tx.PublishUpdatedAt(first); err != nil {
+		t.Fatal(err)
+	}
+	if msg := receive(t, sub); msg.Payload != "updated-at" {
+		t.Fatalf("notification = %q", msg.Payload)
+	}
+	if got := mr.HGet(ecuHashKey, "updated-at"); got != strconv.FormatInt(first.UnixMilli(), 10) {
+		t.Fatalf("timestamp = %q", got)
+	}
+	if err := tx.PublishUpdatedAt(first.Add(500 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if got := mr.HGet(ecuHashKey, "updated-at"); got != strconv.FormatInt(first.UnixMilli(), 10) {
+		t.Fatalf("timestamp advanced too early: %q", got)
+	}
+	second := first.Add(time.Second)
+	if err := tx.PublishUpdatedAt(second); err != nil {
+		t.Fatal(err)
+	}
+	if msg := receive(t, sub); msg.Payload != "updated-at" {
+		t.Fatalf("notification = %q", msg.Payload)
+	}
+	if got := mr.HGet(ecuHashKey, "updated-at"); got != strconv.FormatInt(second.UnixMilli(), 10) {
+		t.Fatalf("timestamp = %q", got)
+	}
+}
+
+func TestUpdatedAtOnlyAdvancesForValidMotionFrames(t *testing.T) {
+	tx, mr := newTestTx(t)
+	a := energyTestApp(t, tx)
+	now := time.Now()
+	a.handleFrameAt(makeFrame(frameStatus2, []byte{20, 0, 0, 0, 0, 1}), now.Add(-200*time.Millisecond))
+	if got := mr.HGet(ecuHashKey, "updated-at"); got != "" {
+		t.Fatalf("unrelated status advanced timestamp: %q", got)
+	}
+	motionAt := now.Add(-100 * time.Millisecond)
+	a.handleFrameAt(makeFrame(frameStatus1, make([]byte, 8)), motionAt)
+	want := strconv.FormatInt(motionAt.UnixMilli(), 10)
+	if got := mr.HGet(ecuHashKey, "updated-at"); got != want {
+		t.Fatalf("motion timestamp = %q, want %q", got, want)
+	}
+	a.handleFrameAt(makeFrame(frameStatus1, []byte{0}), now)
+	if got := mr.HGet(ecuHashKey, "updated-at"); got != want {
+		t.Fatalf("malformed motion advanced timestamp: %q", got)
+	}
+}
+
+func TestUpdatedAtFailureDoesNotAdvanceRateLimit(t *testing.T) {
+	tx, mr := newTestTx(t)
+	mr.Close()
+	if err := tx.PublishUpdatedAt(time.Now()); err == nil {
+		t.Fatal("publication succeeded after Redis stopped")
+	}
+	if !tx.lastUpdatedAt.IsZero() {
+		t.Fatal("failed publication advanced rate limit")
+	}
+}
+
 func TestSetKERSReasonOffStoresBeforeNotification(t *testing.T) {
 	tx, mr := newTestTx(t)
 	sub := redis.NewClient(&redis.Options{Addr: mr.Addr()}).Subscribe(context.Background(), ecuChannel)

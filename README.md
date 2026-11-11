@@ -38,8 +38,11 @@ on Redis persistence; the service does not checkpoint energy to disk.
 
 The `engine-ecu` pub/sub channel carries field names for selected events,
 including `throttle`, `odometer`, `kers`, `kers-reason-off`,
-`regen-available`, and `fault`. Consumers should read the hash after a
-notification rather than treating the notification as a value payload.
+`regen-available`, `fault`, and `updated-at`. Consumers should read the hash
+after a notification rather than treating the notification as a value payload.
+`updated-at` is the Unix time in milliseconds at which the latest published
+motion status frame was received. It is updated and notified at most once per
+second while valid motion frames arrive; silence leaves it unchanged.
 
 Fault presence is stored in `engine-ecu:fault`; changes are also appended to
 `events:faults` with group `engine-ecu`. The service watches `vehicle.state`,

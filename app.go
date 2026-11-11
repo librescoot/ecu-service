@@ -406,7 +406,7 @@ func (a *App) handleFrameAt(frame can.Frame, received time.Time) {
 		return
 	}
 	a.socketUnavailable.Store(false)
-	a.onFrame(frame.ID == frameStatus3)
+	a.onFrame(frame.ID == frameStatus3, frame.ID == frameStatus1, received)
 }
 
 func (a *App) ecuTransportCause(now time.Time) string {
@@ -448,7 +448,7 @@ func (a *App) acceptStatus3Odometer() bool {
 	return !a.lastLiveOdometerOK || odometer != a.lastLiveOdometer
 }
 
-func (a *App) onFrame(genuineStatus3 bool) {
+func (a *App) onFrame(genuineStatus3, motionStatus bool, received time.Time) {
 	a.faultMu.Lock()
 	defer a.faultMu.Unlock()
 	ratios := a.ecu.GearRatios()
@@ -528,6 +528,11 @@ func (a *App) onFrame(genuineStatus3 bool) {
 	if err := a.ipcTx.SendStatus(s); err != nil {
 		statusPublished = false
 		a.log.Error("SendStatus: %v", err)
+	}
+	if statusPublished && motionStatus {
+		if err := a.ipcTx.PublishUpdatedAt(received); err != nil {
+			a.log.Error("PublishUpdatedAt: %v", err)
+		}
 	}
 
 	cfg := a.ecu.ConfigReport()

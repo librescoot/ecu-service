@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	ipc "github.com/librescoot/redis-ipc"
 	"github.com/redis/go-redis/v9"
@@ -96,8 +97,9 @@ type IPCTx struct {
 	mu sync.Mutex
 	// last is the previously sent status; SendStatus only HSETs changed fields
 	// to avoid redundant Redis writes on every CAN frame.
-	last    Status
-	hasLast bool
+	last          Status
+	hasLast       bool
+	lastUpdatedAt time.Time
 	// lastFault is the fault currently reported into faultSetKey. A clear has
 	// to name the code it clears, so ReportFault needs to remember it.
 	lastFault Fault
@@ -105,6 +107,28 @@ type IPCTx struct {
 
 func newIPCTx(ctx context.Context, client *ipc.Client, log *Logger) *IPCTx {
 	return &IPCTx{raw: client.Raw(), client: client, ctx: ctx, log: log}
+}
+
+// PublishUpdatedAt reports the receive time of a valid motion status frame.
+// It never advances on unrelated frames or a timer after CAN traffic stops.
+func (tx *IPCTx) PublishUpdatedAt(received time.Time) error {
+	if received.IsZero() {
+		return nil
+	}
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if !tx.lastUpdatedAt.IsZero() && !received.Before(tx.lastUpdatedAt) && received.Sub(tx.lastUpdatedAt) < time.Second {
+		return nil
+	}
+	_, err := tx.raw.TxPipelined(tx.ctx, func(pipe redis.Pipeliner) error {
+		pipe.HSet(tx.ctx, ecuHashKey, "updated-at", received.UnixMilli())
+		pipe.Publish(tx.ctx, ecuChannel, "updated-at")
+		return nil
+	})
+	if err == nil {
+		tx.lastUpdatedAt = received
+	}
+	return err
 }
 
 func onOff(b bool) string {
