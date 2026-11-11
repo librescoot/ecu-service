@@ -74,9 +74,9 @@ power rails, and pauses during a communication fault. A recent watchdog probe
 also counts toward the request cooldown. No ride-start probes run in
 `ready-to-drive` or after a start timeout.
 
-Other CAN status traffic can keep communication healthy without providing a
-current throttle sample, so the start requests are independent of silence
-detection.
+These requests do not establish freshness by themselves. Other CAN status
+traffic can keep communication healthy without providing a current throttle
+sample, so the start requests are independent of silence detection.
 
 ### Timed boost telemetry
 
