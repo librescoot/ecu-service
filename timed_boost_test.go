@@ -3,10 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
+	"os/exec"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/brutella/can"
+	ipc "github.com/librescoot/redis-ipc"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -139,6 +144,66 @@ func TestTimedBoostRedisExpiryAndNoTimestampRenewal(t *testing.T) {
 	stored, _ = mr.Get(timedBoostKey)
 	if stored != `{"version":1,"valid":false}` {
 		t.Fatalf("invalid evidence retained boost fields: %s", stored)
+	}
+}
+
+func TestTimedBoostRetryWithRedisServer(t *testing.T) {
+	if _, err := exec.LookPath("redis-server"); err != nil {
+		t.Skip("redis-server not installed")
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	_ = listener.Close()
+	server := exec.Command("redis-server", "--bind", "127.0.0.1", "--port", strconv.Itoa(port), "--save", "", "--appendonly", "no", "--dir", t.TempDir())
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Process.Kill(); _ = server.Wait() })
+	ctx := context.Background()
+	raw := redis.NewClient(&redis.Options{Addr: fmt.Sprintf("127.0.0.1:%d", port)})
+	defer raw.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for raw.Ping(ctx).Err() != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("redis-server did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	client, err := ipc.New(ipc.WithAddress("127.0.0.1"), ipc.WithPort(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	tx := newIPCTx(ctx, client, newLogger(LogLevelNone))
+	if err := tx.SendStatus(Status{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Do(ctx, "ACL", "SETUSER", "default", "-eval").Err(); err != nil {
+		t.Fatal(err)
+	}
+	status := Status{TimedBoost: decodeTimedBoost(activeTimedBoostFrame(), time.Now())}
+	if err := tx.SendStatus(status); err == nil {
+		t.Fatal("expected denied EVAL")
+	}
+	if err := raw.Do(ctx, "ACL", "SETUSER", "default", "+eval").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.SendStatus(status); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := raw.Get(ctx, timedBoostKey).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil || decoded["valid"] != true {
+		t.Fatalf("retry payload=%s err=%v", payload, err)
+	}
+	if ttl := raw.PTTL(ctx, timedBoostKey).Val(); ttl <= 0 || ttl > timedBoostTTL {
+		t.Fatalf("invalid expiration %s", ttl)
 	}
 }
 

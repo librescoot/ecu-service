@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/brutella/can"
-	"github.com/redis/go-redis/v9"
 )
 
 const timedBoostTTL = 500 * time.Millisecond
@@ -108,10 +107,10 @@ func (tx *IPCTx) sendTimedBoost(status TimedBoostStatus) error {
 	if err != nil {
 		return err
 	}
-	_, err = tx.raw.TxPipelined(tx.ctx, func(pipe redis.Pipeliner) error {
-		pipe.Do(tx.ctx, "SET", timedBoostKey, payload, "PXAT", deadline.UnixMilli())
-		pipe.Publish(tx.ctx, timedBoostKey, payload)
-		return nil
-	})
-	return err
+	// One command keeps the value and notification ordered without leaving
+	// unread pipeline replies when Redis rejects the transaction's MULTI.
+	return tx.raw.Eval(tx.ctx, `
+redis.call("SET", KEYS[1], ARGV[1], "PXAT", ARGV[2])
+redis.call("PUBLISH", KEYS[1], ARGV[1])
+return 1`, []string{timedBoostKey}, payload, deadline.UnixMilli()).Err()
 }
